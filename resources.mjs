@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createVault } from "./vault.mjs";
+import { createProjectAssets } from "./project-assets.mjs";
 import {
   libraryFail as fail,
   libraryTx as tx,
@@ -21,6 +22,8 @@ const storedArray = (value) =>
   Array.isArray(value) ? value : parse(value, null);
 const metadataKeys = new Set([
   "name",
+  "category_id",
+  "field_values",
   "type",
   "project_ids",
   "environment_id",
@@ -181,6 +184,7 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
   installLibraryCommon(db);
   installResourceSchema(db);
   const vault = createVault({ db, dataDir, masterKey: vaultKey });
+  const assets = createProjectAssets(db);
   const get = (sql, ...args) => db.prepare(sql).get(...args);
   const all = (sql, ...args) => db.prepare(sql).all(...args);
   const run = (sql, ...args) => db.prepare(sql).run(...args);
@@ -313,7 +317,8 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
     });
   }
   function resourceData(body, old = {}) {
-    const type = body.type ?? old.type ?? "application";
+    const extra = assets.resourceFields(body, old);
+    const type = extra.type;
     if (!types.includes(type)) fail(400, "资源类型无效");
     const ids = projectIds(
       body.project_ids ?? storedArray(old.project_ids),
@@ -332,7 +337,11 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
       ["location", "位置", 300],
       ["software_version", "软件版本", 100],
     ])
-      metadata[key] = text(body[key] ?? old[key], label, max);
+      metadata[key] = text(
+        extra.field_values[key] ?? body[key] ?? old[key],
+        label,
+        max,
+      );
     const state = body.state ?? old.state ?? "active";
     if (!["active", "inactive", "retired"].includes(state))
       fail(400, "资源状态无效");
@@ -348,6 +357,7 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
     return {
       name: text(body.name ?? old.name, "资源名称", 200, true),
       type,
+      ...extra,
       project_ids: ids,
       environment_id: env,
       state,
@@ -359,6 +369,7 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
   function hydratedResource(value) {
     return {
       ...value,
+      ...assets.hydrateResource(value),
       project_ids: parse(value.project_ids),
       environment_name: value.environment_id
         ? get("SELECT name FROM environments WHERE id=?", value.environment_id)
@@ -375,6 +386,7 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
     };
   }
   function saveResourceRelations(id, data) {
+    assets.saveResource(id, data);
     run("DELETE FROM resource_endpoints WHERE resource_id=?", id);
     data.endpoints.forEach((e, i) =>
       run(
@@ -710,6 +722,8 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
     params = new URLSearchParams(),
   }) {
     route = route.replace(/^\/api(?=\/)/, "");
+    const extended = await assets.api({ route, method, b, user, params });
+    if (extended) return extended;
     if (["/resources", "/credentials"].includes(route)) {
       if (!user) fail(401, "请先登录后查看项目内部资料");
       if (method !== "GET") fail(405, "不支持的资料操作");
@@ -803,7 +817,8 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
                 id,
               ) ||
               get(
-                "SELECT id FROM configuration_applications WHERE environment_id=? LIMIT 1",
+                "SELECT id FROM configuration_applications WHERE environment_id=? UNION ALL SELECT id FROM project_deployments WHERE environment_id=? LIMIT 1",
+                id,
                 id,
               )
             )
@@ -851,6 +866,7 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
         ).map(hydratedResource);
         return {
           data: {
+            categories: assets.categories(projectId),
             resources: filtered(values, params, [
               "name",
               "description",
@@ -928,7 +944,15 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
           const removed = before.project_ids.filter(
             (p) => !data.project_ids.includes(p),
           );
-          for (const p of removed)
+          for (const p of removed) {
+            if (
+              get(
+                "SELECT id FROM project_deployments WHERE project_id=? AND deleted=0 AND EXISTS(SELECT 1 FROM json_each(json_extract(data_json,'$.resource_ids')) WHERE value=?) LIMIT 1",
+                p,
+                id,
+              )
+            )
+              fail(409, "该项目仍有部署记录关联此资源，请先调整部署信息");
             if (
               get(
                 "SELECT id FROM credentials WHERE resource_id=? AND deleted=0 AND EXISTS(SELECT 1 FROM json_each(credentials.project_ids) WHERE value=?) UNION ALL SELECT id FROM configurations WHERE resource_id=? AND deleted=0 AND project_id=? LIMIT 1",
@@ -939,6 +963,7 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
               )
             )
               fail(409, "该项目仍有账号或配置关联此资源，请先调整关联");
+          }
           run(
             "UPDATE resources SET project_ids=?,name=?,type=?,environment_id=?,description=?,owner=?,model=?,serial_number=?,location=?,software_version=?,state=?,version=version+1,updated_at=? WHERE id=?",
             JSON.stringify(data.project_ids),
@@ -1444,6 +1469,15 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
             409,
             "此记录已被多个项目引用，请先取消其他项目的关联，避免影响共享资料",
           );
+        if (
+          deleting &&
+          entity === "resources" &&
+          get(
+            "SELECT id FROM project_deployments WHERE deleted=0 AND EXISTS(SELECT 1 FROM json_each(json_extract(data_json,'$.resource_ids')) WHERE value=?) LIMIT 1",
+            id,
+          )
+        )
+          fail(409, "资源仍被部署记录关联，请先调整部署信息");
         run(
           `UPDATE ${entity} SET deleted=?,version=version+1,updated_at=? WHERE id=?`,
           deleting ? 1 : 0,

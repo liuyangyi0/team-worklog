@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
   Plus,
   Search,
+  Settings2,
   Server,
   ShieldCheck,
   Trash2,
@@ -25,6 +26,13 @@ import {
 import { api } from "../api.js";
 import { displayTime, fileSize } from "../library-api.js";
 import { InternalLogin } from "./ProjectLibrary.jsx";
+import {
+  ResourceCategoryManager,
+  ResourceFields,
+  ResourceFieldDetails,
+  resourceCategoryName,
+} from "./ResourceSchema.jsx";
+import ProjectDeployments from "./ProjectDeployments.jsx";
 import {
   Field,
   FormActions,
@@ -84,6 +92,7 @@ function ResourceSession({ project, user, members = [] }) {
   const [tab, setTab] = useState("resources"),
     [data, setData] = useState({
       resources: [],
+      categories: [],
       environments: [],
       credentials: [],
       configurations: [],
@@ -114,6 +123,7 @@ function ResourceSession({ project, user, members = [] }) {
       if (active.current && token === sequence.current) {
         setData({
           resources: resources.resources || [],
+          categories: resources.categories || [],
           environments: resources.environments || [],
           credentials: credentials.credentials || [],
           configurations: configurations.configurations || [],
@@ -131,7 +141,8 @@ function ResourceSession({ project, user, members = [] }) {
   useEffect(() => {
     load();
   }, []);
-  const { resources, environments, credentials, configurations } = data;
+  const { resources, categories, environments, credentials, configurations } =
+    data;
   const matching = (item) =>
     (!resourceFilter ||
       (tab === "resources" ? item.id : item.resource_id) === resourceFilter) &&
@@ -143,6 +154,8 @@ function ResourceSession({ project, user, members = [] }) {
         item.description,
         item.owner,
         item.path,
+        item.category?.name,
+        ...Object.values(item.field_values || {}),
         resourceName(item.resource_id, resources),
         ...(item.endpoints || []).map((e) => e.address),
       ]
@@ -165,7 +178,7 @@ function ResourceSession({ project, user, members = [] }) {
             设备、软件与数据库统一管理，账号和配置随项目完整交接。
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             className={secondary}
             onClick={() => setModal({ type: "recycle" })}
@@ -173,7 +186,7 @@ function ResourceSession({ project, user, members = [] }) {
             <Trash2 size={15} />
             回收站
           </button>
-          {tab !== "configurations" && (
+          {["resources", "credentials"].includes(tab) && (
             <button
               className={secondary}
               onClick={() => setModal({ type: "share", entity: tab })}
@@ -190,26 +203,35 @@ function ResourceSession({ project, user, members = [] }) {
             环境管理
           </button>
           <button
-            className={primary}
-            onClick={() =>
-              setModal({
-                type:
-                  tab === "resources"
-                    ? "resource"
-                    : tab === "credentials"
-                      ? "credential"
-                      : "configuration",
-                create: true,
-              })
-            }
+            className={secondary}
+            onClick={() => setModal({ type: "categories" })}
           >
-            <Plus size={15} />
-            {tab === "resources"
-              ? "添加资源"
-              : tab === "credentials"
-                ? "添加账号"
-                : "添加配置"}
+            <Settings2 size={15} />
+            分类与字段
           </button>
+          {tab !== "deployments" && (
+            <button
+              className={primary}
+              onClick={() =>
+                setModal({
+                  type:
+                    tab === "resources"
+                      ? "resource"
+                      : tab === "credentials"
+                        ? "credential"
+                        : "configuration",
+                  create: true,
+                })
+              }
+            >
+              <Plus size={15} />
+              {tab === "resources"
+                ? "添加资源"
+                : tab === "credentials"
+                  ? "添加账号"
+                  : "添加配置"}
+            </button>
+          )}
         </div>
       </div>
       <div className="grid gap-3 sm:grid-cols-3">
@@ -271,11 +293,12 @@ function ResourceSession({ project, user, members = [] }) {
         </div>
       )}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex rounded-xl bg-slate-200/50 p-1">
+        <div className="flex max-w-full overflow-x-auto rounded-xl bg-slate-200/50 p-1">
           {[
             ["resources", "设备与应用"],
             ["credentials", "账号密码"],
             ["configurations", "配置管理"],
+            ["deployments", "部署信息"],
           ].map(([value, label]) => (
             <button
               key={value}
@@ -285,7 +308,7 @@ function ResourceSession({ project, user, members = [] }) {
                 setSearch("");
               }}
               className={
-                "rounded-lg px-4 py-2 text-sm transition " +
+                "shrink-0 whitespace-nowrap rounded-lg px-4 py-2 text-sm transition " +
                 (tab === value
                   ? "bg-white font-medium text-slate-700 shadow-sm"
                   : "text-slate-500 hover:text-slate-700")
@@ -295,35 +318,44 @@ function ResourceSession({ project, user, members = [] }) {
             </button>
           ))}
         </div>
-        <div className="flex flex-wrap gap-2">
-          <div className="relative">
-            <Search
-              size={15}
-              className="absolute left-3 top-2.5 text-slate-300"
-            />
-            <input
-              aria-label="搜索资源或账号"
-              placeholder="名称、用户名、IP…"
-              className={inputClass + " max-w-64 py-2 pl-9 text-xs"}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+        {tab !== "deployments" && (
+          <div className="flex flex-wrap gap-2">
+            <div className="relative">
+              <Search
+                size={15}
+                className="absolute left-3 top-2.5 text-slate-300"
+              />
+              <input
+                aria-label="搜索资源或账号"
+                placeholder="名称、用户名、IP…"
+                className={inputClass + " max-w-64 py-2 pl-9 text-xs"}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            <select
+              aria-label="按资源筛选"
+              className={inputClass + " w-auto max-w-44 py-2 text-xs"}
+              value={resourceFilter}
+              onChange={(e) => setResourceFilter(e.target.value)}
+            >
+              <option value="">全部资源</option>
+              {resources.map((r) => (
+                <option value={r.id} key={r.id}>
+                  {r.name}
+                </option>
+              ))}
+            </select>
           </div>
-          <select
-            aria-label="按资源筛选"
-            className={inputClass + " w-auto max-w-44 py-2 text-xs"}
-            value={resourceFilter}
-            onChange={(e) => setResourceFilter(e.target.value)}
-          >
-            <option value="">全部资源</option>
-            {resources.map((r) => (
-              <option value={r.id} key={r.id}>
-                {r.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        )}
       </div>
+      {tab === "deployments" && (
+        <ProjectDeployments
+          projectId={project.id}
+          resources={resources}
+          environments={environments}
+        />
+      )}
       {tab === "resources" && (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {resources.filter(matching).map((resource) => {
@@ -346,7 +378,7 @@ function ResourceSession({ project, user, members = [] }) {
                       {resource.name}
                     </p>
                     <p className="mt-1 text-xs text-slate-400">
-                      {types[resource.type] || resource.type} ·{" "}
+                      {resourceCategoryName(resource)} ·{" "}
                       {environmentName(resource.environment_id, environments)}
                     </p>
                   </div>
@@ -524,6 +556,7 @@ function ResourceSession({ project, user, members = [] }) {
         </div>
       )}
       {loaded &&
+        tab !== "deployments" &&
         !(
           tab === "resources"
             ? resources
@@ -559,6 +592,14 @@ function ResourceSession({ project, user, members = [] }) {
           最新上传、正式发布、现场实际使用分别记录。登记使用是人工记录，不会自动连接设备或执行配置。
         </div>
       )}
+      {modal?.type === "categories" && (
+        <ResourceCategoryManager
+          categories={categories}
+          projectId={project.id}
+          onClose={() => setModal(null)}
+          onSaved={saved}
+        />
+      )}
       {modal?.type === "environments" && (
         <EnvironmentDialog
           environments={environments}
@@ -587,6 +628,7 @@ function ResourceSession({ project, user, members = [] }) {
           item={modal.item}
           projectId={project.id}
           resources={resources}
+          categories={categories}
           environments={environments}
           credentials={credentials}
           configurations={configurations}
@@ -724,6 +766,7 @@ function ResourceDialog({
   item,
   projectId,
   resources,
+  categories,
   environments,
   credentials,
   configurations,
@@ -735,6 +778,8 @@ function ResourceDialog({
   const [form, setForm] = useState({
       name: "",
       type: "application",
+      category_id: "",
+      field_values: {},
       owner: "",
       description: "",
       environment_id: "",
@@ -745,6 +790,15 @@ function ResourceDialog({
     [error, setError] = useState(null),
     [busy, setBusy] = useState(false),
     [editing, setEditing] = useState(!item);
+  const categoryOptions = [
+    ...categories,
+    ...(item?.category && !categories.some((c) => c.id === item.category.id)
+      ? [item.category]
+      : []),
+  ];
+  const selectedCategory = categoryOptions.find(
+    (c) => c.id === form.category_id,
+  );
   const update = (field, value) => setForm((f) => ({ ...f, [field]: value }));
   async function save(e) {
     e.preventDefault();
@@ -758,7 +812,14 @@ function ResourceDialog({
         item ? "PATCH" : "POST",
         {
           name: form.name,
-          type: form.type,
+          type: selectedCategory?.base_type || form.type,
+          category_id: selectedCategory?.id,
+          category_version: selectedCategory?.version,
+          field_values: Object.fromEntries(
+            (selectedCategory?.fields || [])
+              .filter((f) => Object.hasOwn(form.field_values, f.key))
+              .map((f) => [f.key, form.field_values[f.key]]),
+          ),
           description: form.description,
           owner: form.owner,
           environment_id: form.environment_id || null,
@@ -815,7 +876,7 @@ function ResourceDialog({
     <Modal
       title={item ? item.name : "添加项目资源"}
       sub="软件、数据库、设备可以独立建立，按实际关系关联。"
-      icon={iconFor(form.type)}
+      icon={iconFor(selectedCategory?.base_type || form.type)}
       onClose={onClose}
       wide
     >
@@ -825,7 +886,7 @@ function ResourceDialog({
             <>
               <div className="grid gap-3 sm:grid-cols-3">
                 {[
-                  ["类型", types[item.type]],
+                  ["类型", resourceCategoryName(item)],
                   ["环境", environmentName(item.environment_id, environments)],
                   ["维护人", item.owner || "未指定"],
                 ].map(([name, value]) => (
@@ -835,6 +896,7 @@ function ResourceDialog({
                   </div>
                 ))}
               </div>
+              <ResourceFieldDetails item={item} categories={categories} />
               {item.description && (
                 <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-500">
                   {item.description}
@@ -935,206 +997,250 @@ function ResourceDialog({
             </>
           ) : (
             <>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Field label="资源名称">
-                  <input
-                    autoFocus
-                    required
-                    maxLength={150}
-                    value={form.name}
-                    onChange={(e) => update("name", e.target.value)}
-                    className={inputClass}
-                  />
-                </Field>
-                <Field label="资源类型">
-                  <select
-                    value={form.type}
-                    onChange={(e) => update("type", e.target.value)}
-                    className={inputClass}
-                  >
-                    {Object.entries(types).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="所属环境">
-                  <select
-                    value={form.environment_id || ""}
-                    onChange={(e) => update("environment_id", e.target.value)}
-                    className={inputClass}
-                  >
-                    <option value="">未指定</option>
-                    {environments.map((e) => (
-                      <option value={e.id} key={e.id}>
-                        {e.name}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="维护人">
-                  <input
-                    maxLength={80}
-                    value={form.owner || ""}
-                    onChange={(e) => update("owner", e.target.value)}
-                    className={inputClass}
-                  />
-                </Field>
-              </div>
               <Field
-                label="用途说明"
-                hint="密码请放在账号库中，勿填写在公开说明或地址中。"
+                label="资源类型"
+                hint="先选择分类，再填写对应资料。切换类型保留已有资源的历史字段。"
               >
-                <textarea
-                  rows={2}
-                  maxLength={3000}
-                  value={form.description || ""}
-                  onChange={(e) => update("description", e.target.value)}
+                <select
+                  required
+                  autoFocus={!item}
                   className={inputClass}
-                />
+                  value={form.category_id}
+                  onChange={(e) => update("category_id", e.target.value)}
+                >
+                  <option value="">请选择资源类型</option>
+                  {categoryOptions
+                    .filter(
+                      (c) =>
+                        (!c.archived &&
+                          c.project_id === (item?.project_id || projectId)) ||
+                        c.id === item?.category_id,
+                    )
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                        {c.archived ? "（已停用）" : ""}
+                      </option>
+                    ))}
+                </select>
               </Field>
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-sm font-medium text-slate-600">
-                    访问地址 / IP
-                  </h3>
-                  <button
-                    type="button"
-                    className={tiny}
-                    onClick={() =>
-                      update("endpoints", [
-                        ...form.endpoints,
-                        { address: "", port: "", protocol: "", purpose: "" },
-                      ])
+              {selectedCategory ? (
+                <>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label="资源名称">
+                      <input
+                        required
+                        maxLength={150}
+                        value={form.name}
+                        onChange={(e) => update("name", e.target.value)}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="所属环境">
+                      <select
+                        value={form.environment_id || ""}
+                        onChange={(e) =>
+                          update("environment_id", e.target.value)
+                        }
+                        className={inputClass}
+                      >
+                        <option value="">未指定</option>
+                        {environments.map((e) => (
+                          <option value={e.id} key={e.id}>
+                            {e.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="维护人">
+                      <input
+                        maxLength={80}
+                        value={form.owner || ""}
+                        onChange={(e) => update("owner", e.target.value)}
+                        className={inputClass}
+                      />
+                    </Field>
+                  </div>
+                  <ResourceFields
+                    category={selectedCategory}
+                    values={form.field_values}
+                    onChange={(key, value) =>
+                      update("field_values", {
+                        ...form.field_values,
+                        [key]: value,
+                      })
                     }
+                  />
+                  <Field
+                    label="用途说明"
+                    hint="密码请放在账号库中，勿填写在公开说明或地址中。"
                   >
-                    <Plus size={13} />
-                    添加地址
-                  </button>
-                </div>
-                <div className="space-y-2">
-                  {form.endpoints.map((point, i) => (
-                    <div
-                      className="grid grid-cols-[1fr_70px_80px_1fr_28px] gap-2 rounded-xl bg-slate-50 p-2"
-                      key={i}
-                    >
-                      {[
-                        ["address", "IP / 地址"],
-                        ["port", "端口"],
-                        ["protocol", "协议"],
-                        ["purpose", "用途"],
-                      ].map(([field, placeholder]) => (
-                        <input
-                          aria-label={placeholder + (i + 1)}
-                          key={field}
-                          value={point[field] || ""}
-                          type={field === "port" ? "number" : "text"}
-                          min={field === "port" ? 1 : undefined}
-                          max={field === "port" ? 65535 : undefined}
-                          placeholder={placeholder}
+                    <textarea
+                      rows={2}
+                      maxLength={3000}
+                      value={form.description || ""}
+                      onChange={(e) => update("description", e.target.value)}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <h3 className="text-sm font-medium text-slate-600">
+                        访问地址 / IP
+                      </h3>
+                      <button
+                        type="button"
+                        className={tiny}
+                        onClick={() =>
+                          update("endpoints", [
+                            ...form.endpoints,
+                            {
+                              address: "",
+                              port: "",
+                              protocol: "",
+                              purpose: "",
+                            },
+                          ])
+                        }
+                      >
+                        <Plus size={13} />
+                        添加地址
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {form.endpoints.map((point, i) => (
+                        <div
+                          className="grid grid-cols-2 gap-2 rounded-xl bg-slate-50 p-2 sm:grid-cols-[1fr_70px_80px_1fr_28px]"
+                          key={i}
+                        >
+                          {[
+                            ["address", "IP / 地址"],
+                            ["port", "端口"],
+                            ["protocol", "协议"],
+                            ["purpose", "用途"],
+                          ].map(([field, placeholder]) => (
+                            <input
+                              aria-label={placeholder + (i + 1)}
+                              key={field}
+                              value={point[field] || ""}
+                              type={field === "port" ? "number" : "text"}
+                              min={field === "port" ? 1 : undefined}
+                              max={field === "port" ? 65535 : undefined}
+                              placeholder={placeholder}
+                              onChange={(e) =>
+                                update(
+                                  "endpoints",
+                                  form.endpoints.map((p, j) =>
+                                    i === j
+                                      ? { ...p, [field]: e.target.value }
+                                      : p,
+                                  ),
+                                )
+                              }
+                              className={
+                                inputClass + " min-w-0 px-2 py-2 text-xs"
+                              }
+                            />
+                          ))}
+                          <button
+                            type="button"
+                            className="text-slate-400 hover:text-rose-500"
+                            aria-label="移除地址"
+                            onClick={() =>
+                              update(
+                                "endpoints",
+                                form.endpoints.filter((_, j) => i !== j),
+                              )
+                            }
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <h3 className="text-sm font-medium text-slate-600">
+                        关联资源
+                      </h3>
+                      <button
+                        type="button"
+                        className={tiny}
+                        onClick={() =>
+                          update("relations", [
+                            ...form.relations,
+                            { type: "runs_on", target_id: "" },
+                          ])
+                        }
+                      >
+                        <Plus size={13} />
+                        添加关联
+                      </button>
+                    </div>
+                    {form.relations.map((r, i) => (
+                      <div className="mb-2 flex gap-2" key={i}>
+                        <select
+                          className={inputClass + " w-auto"}
+                          value={r.type}
                           onChange={(e) =>
                             update(
-                              "endpoints",
-                              form.endpoints.map((p, j) =>
-                                i === j ? { ...p, [field]: e.target.value } : p,
+                              "relations",
+                              form.relations.map((p, j) =>
+                                i === j ? { ...p, type: e.target.value } : p,
                               ),
                             )
                           }
-                          className={inputClass + " min-w-0 px-2 py-2 text-xs"}
-                        />
-                      ))}
-                      <button
-                        type="button"
-                        className="text-slate-400 hover:text-rose-500"
-                        aria-label="移除地址"
-                        onClick={() =>
-                          update(
-                            "endpoints",
-                            form.endpoints.filter((_, j) => i !== j),
-                          )
-                        }
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-sm font-medium text-slate-600">
-                    关联资源
-                  </h3>
-                  <button
-                    type="button"
-                    className={tiny}
-                    onClick={() =>
-                      update("relations", [
-                        ...form.relations,
-                        { type: "runs_on", target_id: "" },
-                      ])
-                    }
-                  >
-                    <Plus size={13} />
-                    添加关联
-                  </button>
-                </div>
-                {form.relations.map((r, i) => (
-                  <div className="mb-2 flex gap-2" key={i}>
-                    <select
-                      className={inputClass + " w-auto"}
-                      value={r.type}
-                      onChange={(e) =>
-                        update(
-                          "relations",
-                          form.relations.map((p, j) =>
-                            i === j ? { ...p, type: e.target.value } : p,
-                          ),
-                        )
-                      }
-                    >
-                      <option value="runs_on">运行在</option>
-                      <option value="connects_to">连接到</option>
-                      <option value="depends_on">依赖于</option>
-                    </select>
-                    <select
-                      className={inputClass}
-                      value={r.target_id}
-                      onChange={(e) =>
-                        update(
-                          "relations",
-                          form.relations.map((p, j) =>
-                            i === j ? { ...p, target_id: e.target.value } : p,
-                          ),
-                        )
-                      }
-                    >
-                      <option value="">选择项目资源</option>
-                      {resources
-                        .filter((p) => p.id !== item?.id)
-                        .map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name}
-                          </option>
-                        ))}
-                    </select>
-                    <button
-                      type="button"
-                      className={tiny}
-                      aria-label="移除关联"
-                      onClick={() =>
-                        update(
-                          "relations",
-                          form.relations.filter((_, j) => i !== j),
-                        )
-                      }
-                    >
-                      <X size={14} />
-                    </button>
+                        >
+                          <option value="runs_on">运行在</option>
+                          <option value="connects_to">连接到</option>
+                          <option value="depends_on">依赖于</option>
+                        </select>
+                        <select
+                          className={inputClass}
+                          value={r.target_id}
+                          onChange={(e) =>
+                            update(
+                              "relations",
+                              form.relations.map((p, j) =>
+                                i === j
+                                  ? { ...p, target_id: e.target.value }
+                                  : p,
+                              ),
+                            )
+                          }
+                        >
+                          <option value="">选择项目资源</option>
+                          {resources
+                            .filter((p) => p.id !== item?.id)
+                            .map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.name}
+                              </option>
+                            ))}
+                        </select>
+                        <button
+                          type="button"
+                          className={tiny}
+                          aria-label="移除关联"
+                          onClick={() =>
+                            update(
+                              "relations",
+                              form.relations.filter((_, j) => i !== j),
+                            )
+                          }
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </>
+              ) : (
+                <p className="rounded-xl bg-slate-50 px-4 py-8 text-center text-sm text-slate-400">
+                  选择软件、硬件或自定义分类后显示填写内容
+                </p>
+              )}
             </>
           )}
         </div>
@@ -1142,7 +1248,11 @@ function ResourceDialog({
           <FormError error={error} />
         </div>
         {editing ? (
-          <FormActions onClose={onClose} busy={busy} />
+          <FormActions
+            onClose={onClose}
+            busy={busy}
+            disabled={!selectedCategory}
+          />
         ) : (
           <div className="flex items-center justify-end gap-2 px-6 py-5">
             <button

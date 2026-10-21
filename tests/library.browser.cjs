@@ -178,8 +178,10 @@ const { chromium } = require(
       .getByRole("button", { name: "资源与配置", exact: true })
       .click();
     await page.getByRole("button", { name: "添加资源", exact: true }).click();
+    await page
+      .getByLabel("资源类型", { exact: true })
+      .selectOption({ label: "数据库" });
     await page.getByLabel("资源名称", { exact: true }).fill("项目数据库");
-    await page.getByLabel("资源类型", { exact: true }).selectOption("database");
     await page
       .getByRole("dialog")
       .getByRole("button", { name: "保存", exact: true })

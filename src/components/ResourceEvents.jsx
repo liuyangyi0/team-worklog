@@ -8,6 +8,8 @@ const objects = {
   folder: "目录",
   release: "交付归档",
   resource: "资源",
+  "resource-category": "资源分类",
+  deployment: "项目部署",
   environment: "环境",
   credential: "账号",
   configuration: "配置",
