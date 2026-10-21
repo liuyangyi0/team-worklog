@@ -36,6 +36,7 @@ const targets = process.argv.slice(2).length
       "library.browser.cjs",
       "assets.browser.cjs",
       "review-ui.browser.cjs",
+      "batch.browser.cjs",
     ];
 let executable = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
 if (!executable && process.platform === "win32") {

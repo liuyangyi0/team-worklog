@@ -65,9 +65,14 @@ function field(b, k, max = 80, optional = false) {
   return v.trim();
 }
 const projectColors = ["indigo", "emerald", "amber", "rose", "sky", "violet"];
-function projectFields(b, old = { color: "indigo", members: "[]" }) {
+function projectFields(
+  b,
+  old = { color: "indigo", members: "[]", archived: 0 },
+) {
   const color = b.color === undefined ? old.color : b.color;
   if (!projectColors.includes(color)) fail(400, "项目标识色无效");
+  const archived = b.archived === undefined ? old.archived || 0 : b.archived;
+  if (![true, false, 0, 1].includes(archived)) fail(400, "归档状态无效");
   let members = b.members === undefined ? JSON.parse(old.members) : b.members;
   if (
     !Array.isArray(members) ||
@@ -78,7 +83,11 @@ function projectFields(b, old = { color: "indigo", members: "[]" }) {
   )
     fail(400, "成员姓名需为 1–30 字，最多 100 人");
   members = [...new Set(members.map((x) => x.trim()))];
-  return { color, members: JSON.stringify(members) };
+  return {
+    color,
+    members: JSON.stringify(members),
+    archived: Number(archived),
+  };
 }
 function password(b, k = "password") {
   const p = b[k];
@@ -93,7 +102,11 @@ function fields(b, old = {}) {
       b.actual == null
         ? ""
         : splitNames(field(b, "actual", 300, true)).join("、"),
-    date = b.date == null ? "" : field(b, "date", 10, true);
+    date = b.date == null ? "" : field(b, "date", 10, true),
+    description =
+      b.description === undefined ? old.description || "" : b.description;
+  if (typeof description !== "string" || description.trim().length > 2000)
+    fail(400, "任务说明最多 2000 字");
   if (
     date &&
     (!/^\d{4}-\d{2}-\d{2}$/.test(date) ||
@@ -104,6 +117,7 @@ function fields(b, old = {}) {
   if (!owner) fail(400, "请选择原定负责人");
   return {
     task,
+    description: description.trim(),
     owner,
     actual,
     date,
@@ -144,6 +158,10 @@ export async function createApp({
   if (!projectColumns.includes("members"))
     db.exec(
       "ALTER TABLE projects ADD COLUMN members TEXT NOT NULL DEFAULT '[]'",
+    );
+  if (!projectColumns.includes("archived"))
+    db.exec(
+      "ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
     );
   const get = (sql, ...p) => db.prepare(sql).get(...p),
     all = (sql, ...p) => db.prepare(sql).all(...p),
@@ -241,6 +259,117 @@ export async function createApp({
     }
   }
   const canEdit = (user) => Boolean(user);
+  function updateRecord(user, r, f) {
+    const completedAt = isCompleted(f) ? r.completed_at || now() : "";
+    run(
+      "UPDATE records SET task=?,description=?,owner=?,actual=?,date=?,due_date=?,priority=?,blocked=?,blocker_note=?,support_people=?,completed_at=?,version=version+1,updated=? WHERE id=?",
+      f.task,
+      f.description,
+      f.owner,
+      f.actual,
+      f.date,
+      f.due_date,
+      f.priority,
+      f.blocked,
+      f.blocker_note,
+      f.support_people,
+      completedAt,
+      now(),
+      r.id,
+    );
+    saveRelations(db, r.id, f.dependency_ids, r.dependency_ids);
+    notifyRelations(db, user, r, { ...r, ...f });
+    notifyDependents(db, user, r, { ...r, ...f });
+    notifyRecord(db, user, r, { ...r, ...f });
+    audit(user, "update-record", r.id, r, {
+      ...f,
+      parent_id: r.parent_id,
+      parent_task: r.parent_id
+        ? get("SELECT task FROM records WHERE id=?", r.parent_id)?.task || ""
+        : "",
+    });
+  }
+  // Every deleted row shares one group so a single restore undoes the batch.
+  function deleteRecords(user, list) {
+    const group = randomUUID();
+    for (const r of list)
+      for (const item of activeDescendants(db, r.id)) {
+        run(
+          "UPDATE records SET deleted=1,delete_group=?,version=version+1,updated=? WHERE id=?",
+          group,
+          now(),
+          item.id,
+        );
+        audit(user, "delete-record", item.id, item, null);
+        notifyDependents(db, user, item, { ...item, deleted: 1 });
+      }
+    return get(
+      "SELECT r.id,r.version FROM records r LEFT JOIN records p ON p.id=r.parent_id WHERE r.delete_group=? AND r.deleted=1 AND (p.id IS NULL OR p.deleted=0 OR p.delete_group<>r.delete_group) ORDER BY r.created LIMIT 1",
+      group,
+    );
+  }
+  const batchChanges = ["actual", "date", "priority", "due_date"];
+  function batchRecords(user, b) {
+    if (!canEdit(user)) fail(403, "请先登录后修改记录");
+    const items = b.items;
+    if (
+      !Array.isArray(items) ||
+      !items.length ||
+      items.length > 200 ||
+      items.some(
+        (x) =>
+          !x ||
+          typeof x.id !== "string" ||
+          !/^[-\w]{1,100}$/.test(x.id) ||
+          !Number.isSafeInteger(x.version),
+      ) ||
+      new Set(items.map((x) => x.id)).size !== items.length
+    )
+      fail(400, "请选择 1–200 条记录");
+    if (!["update", "delete"].includes(b.action)) fail(400, "不支持的批量操作");
+    const changes = b.action === "update" ? b.changes : {};
+    if (
+      !changes ||
+      typeof changes !== "object" ||
+      Array.isArray(changes) ||
+      Object.keys(changes).some((k) => !batchChanges.includes(k)) ||
+      (b.action === "update" && !Object.keys(changes).length)
+    )
+      fail(400, "请选择要批量修改的内容");
+    return tx(() => {
+      const list = items.map((x) => {
+        const r = relationSnapshot(
+          db,
+          get("SELECT * FROM records WHERE id=?", x.id),
+        );
+        if (!r || r.deleted || r.version !== x.version)
+          fail(409, "部分记录已被修改或删除，请刷新后重试");
+        return r;
+      });
+      if (b.action === "delete")
+        return {
+          ok: true,
+          count: list.length,
+          undo: deleteRecords(user, list),
+        };
+      for (const r of list)
+        updateRecord(
+          user,
+          r,
+          fields(
+            {
+              task: r.task,
+              owner: r.owner,
+              actual: r.actual,
+              date: r.date,
+              ...changes,
+            },
+            r,
+          ),
+        );
+      return { ok: true, count: list.length };
+    });
+  }
   async function body(req, maxBytes = 65536) {
     const chunks = [];
     let size = 0;
@@ -509,7 +638,11 @@ export async function createApp({
               f.color,
               f.members,
             );
-            audit(user, "create-project", id, null, { name, ...f });
+            audit(user, "create-project", id, null, {
+              name,
+              color: f.color,
+              members: f.members,
+            });
           });
           return json({ id }, 201);
         }
@@ -525,10 +658,11 @@ export async function createApp({
           const f = projectFields(b, p);
           tx(() => {
             run(
-              "UPDATE projects SET name=?,color=?,members=?,version=version+1 WHERE id=?",
+              "UPDATE projects SET name=?,color=?,members=?,archived=?,version=version+1 WHERE id=?",
               name,
               f.color,
               f.members,
+              f.archived,
               p.id,
             );
             audit(user, "update-project", p.id, p, { name, ...f });
@@ -547,10 +681,11 @@ export async function createApp({
           const completedAt = isCompleted(f) ? now() : "";
           tx(() => {
             run(
-              "INSERT INTO records(id,project_id,task,owner,actual,date,creator,created,updated,version,deleted,parent_id,completed_at,due_date,priority,blocked,blocker_note,support_people) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              "INSERT INTO records(id,project_id,task,description,owner,actual,date,creator,created,updated,version,deleted,parent_id,completed_at,due_date,priority,blocked,blocker_note,support_people) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
               id,
               b.project_id,
               f.task,
+              f.description,
               f.owner,
               f.actual,
               f.date,
@@ -586,6 +721,8 @@ export async function createApp({
           });
           return json({ id }, 201);
         }
+        if (route === "/api/records/batch" && req.method === "POST")
+          return json(batchRecords(user, b));
         const rm = route.match(/^\/api\/records\/([\w-]+)(\/restore)?$/);
         if (rm && ["PATCH", "DELETE", "POST"].includes(req.method)) {
           const r = relationSnapshot(
@@ -630,52 +767,11 @@ export async function createApp({
               (b.parent_id || null) !== r.parent_id
             )
               fail(400, "暂不支持调整上级任务");
-            const completedAt = isCompleted(f) ? r.completed_at || now() : "";
-            tx(() => {
-              run(
-                "UPDATE records SET task=?,owner=?,actual=?,date=?,due_date=?,priority=?,blocked=?,blocker_note=?,support_people=?,completed_at=?,version=version+1,updated=? WHERE id=?",
-                f.task,
-                f.owner,
-                f.actual,
-                f.date,
-                f.due_date,
-                f.priority,
-                f.blocked,
-                f.blocker_note,
-                f.support_people,
-                completedAt,
-                now(),
-                r.id,
-              );
-              saveRelations(db, r.id, f.dependency_ids, r.dependency_ids);
-              notifyRelations(db, user, r, { ...r, ...f });
-              notifyDependents(db, user, r, { ...r, ...f });
-              notifyRecord(db, user, r, { ...r, ...f });
-              audit(user, "update-record", r.id, r, {
-                ...f,
-                parent_id: r.parent_id,
-                parent_task: r.parent_id
-                  ? get("SELECT task FROM records WHERE id=?", r.parent_id)
-                      ?.task || ""
-                  : "",
-              });
-            });
+            tx(() => updateRecord(user, r, f));
             return json({ ok: true });
           }
           if (!rm[2] && req.method === "DELETE") {
-            tx(() => {
-              const group = randomUUID();
-              for (const item of activeDescendants(db, r.id)) {
-                run(
-                  "UPDATE records SET deleted=1,delete_group=?,version=version+1,updated=? WHERE id=?",
-                  group,
-                  now(),
-                  item.id,
-                );
-                audit(user, "delete-record", item.id, item, null);
-                notifyDependents(db, user, item, { ...item, deleted: 1 });
-              }
-            });
+            tx(() => deleteRecords(user, [r]));
             return json({ ok: true, version: r.version + 1 });
           }
         }

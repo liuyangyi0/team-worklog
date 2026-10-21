@@ -1,5 +1,6 @@
 const recordKeys = [
   "task",
+  "description",
   "owner",
   "actual",
   "due_date",
@@ -12,7 +13,7 @@ const recordKeys = [
   "support_people",
 ];
 const commentKeys = ["body", "task"];
-const projectKeys = ["name", "color", "members"];
+const projectKeys = ["name", "color", "members", "archived"];
 const parse = (value) => {
   try {
     return value == null ? null : JSON.parse(value);
@@ -42,6 +43,8 @@ function snapshot(value, project, comment = false) {
         : [];
     } else if (key === "blocked")
       result[key] = source[key] ? "已标记" : "未标记";
+    else if (key === "archived")
+      result[key] = source[key] ? "已归档" : "进行中";
     else if (typeof source[key] === "string") result[key] = source[key];
   }
   return result;

@@ -22,6 +22,10 @@ export function installTaskSchema(db) {
       db.exec(
         "ALTER TABLE records ADD COLUMN parent_id TEXT REFERENCES records(id)",
       );
+    if (!columns.includes("description"))
+      db.exec(
+        "ALTER TABLE records ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+      );
     if (!columns.includes("delete_group"))
       db.exec(
         "ALTER TABLE records ADD COLUMN delete_group TEXT NOT NULL DEFAULT ''",
