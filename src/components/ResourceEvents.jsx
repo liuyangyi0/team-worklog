@@ -14,6 +14,9 @@ const objects = {
   credential: "账号",
   configuration: "配置",
   upload: "上传",
+  note: "随手记",
+  checklist: "资料清单",
+  "checklist-template": "清单模板",
 };
 const actions = {
   create: "新建",
@@ -28,6 +31,9 @@ const actions = {
   "select-version": "采用工作版本",
   upload: "上传版本",
   apply: "登记配置使用",
+  "apply-checklist": "套用资料清单",
+  "attach-note": "添加附件",
+  "detach-note": "移除附件",
 };
 function describe(event) {
   if (actions[event.action]) return actions[event.action];

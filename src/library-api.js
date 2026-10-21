@@ -199,3 +199,18 @@ export async function uploadFile(
 export async function cancelUpload(uploadId) {
   if (uploadId) await api("/uploads/" + uploadId + "/cancel", "POST", {});
 }
+// Finds or creates a top-level folder, tolerating someone else creating it first.
+export async function ensureFolder(projectId, name, known = []) {
+  const find = (list) => list.find((f) => !f.parent_id && f.name === name);
+  let folder = find(known);
+  if (folder) return folder.id;
+  try {
+    return (await api("/projects/" + projectId + "/folders", "POST", { name }))
+      .id;
+  } catch (error) {
+    if (error.status !== 409) throw error;
+    folder = find((await api("/projects/" + projectId + "/documents")).folders);
+    if (!folder) throw error;
+    return folder.id;
+  }
+}

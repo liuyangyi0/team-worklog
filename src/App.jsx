@@ -7,6 +7,7 @@ import ProjectLibrary from "./components/ProjectLibrary.jsx";
 import ProjectResources from "./components/ProjectResources.jsx";
 import ResourceEvents from "./components/ResourceEvents.jsx";
 import Deliverables from "./components/Deliverables.jsx";
+import SiteLog, { NoteDialog } from "./components/SiteLog.jsx";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Settings,
@@ -96,7 +97,9 @@ export default function App() {
     [tab, setTab] = useState("records"),
     [projectModule, setProjectModule] = useState(() => {
       const value = new URLSearchParams(location.search).get("module");
-      return ["documents", "resources", "resource-events"].includes(value)
+      return ["notes", "documents", "resources", "resource-events"].includes(
+        value,
+      )
         ? value
         : "records";
     }),
@@ -104,6 +107,9 @@ export default function App() {
     [toast, setToast] = useState(null),
     [capture, setCapture] = useState(false),
     [selectedIds, setSelectedIds] = useState(() => new Set()),
+    [noteDraft, setNoteDraft] = useState(null),
+    [notesRevision, setNotesRevision] = useState(0),
+    [libraryRevision, setLibraryRevision] = useState(0),
     [logRevision, setLogRevision] = useState(0);
   const { user, projects, records } = state,
     project =
@@ -334,6 +340,11 @@ export default function App() {
       project: projects.find((p) => p.id === parent.project_id),
     });
   }
+  // Uploads and site-log entries change the library and the checklist badge.
+  function materialsChanged() {
+    setLibraryRevision((n) => n + 1);
+    refresh(true).catch(() => {});
+  }
   async function contentChanged() {
     setLogRevision((n) => n + 1);
     await refresh(true);
@@ -430,6 +441,7 @@ export default function App() {
               >
                 {[
                   ["records", "工作记录"],
+                  ["notes", "随手记"],
                   ["documents", "项目资料"],
                   ["resources", "资源与配置"],
                   ["resource-events", "资料日志"],
@@ -438,6 +450,15 @@ export default function App() {
                     key={id}
                     type="button"
                     aria-current={projectModule === id ? "page" : undefined}
+                    aria-label={label}
+                    title={
+                      id === "documents" &&
+                      state.checklist?.[project?.id]?.missing > 0
+                        ? "必需资料缺 " +
+                          state.checklist[project.id].missing +
+                          " 项"
+                        : undefined
+                    }
                     onClick={() => {
                       setProjectModule(id);
                       setCapture(false);
@@ -455,6 +476,15 @@ export default function App() {
                     }
                   >
                     {label}
+                    {id === "documents" &&
+                      state.checklist?.[project?.id]?.missing > 0 && (
+                        <span
+                          aria-hidden="true"
+                          className="ml-1.5 rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] text-rose-500"
+                        >
+                          缺 {state.checklist[project.id].missing}
+                        </span>
+                      )}
                   </button>
                 ))}
               </nav>
@@ -486,26 +516,52 @@ export default function App() {
                   )}
                 </div>
               ) : null}
-              {projectModule === "documents" ? (
-                <div className="pt-8">
+              {projectModule === "notes" ? (
+                <SiteLog
+                  key={
+                    "notes:" + (project?.id || "") + ":" + (user?.id || "guest")
+                  }
+                  project={project}
+                  user={user}
+                  revision={notesRevision}
+                  onLogin={() => setModal({ type: "auth" })}
+                  onCreate={() => setNoteDraft({ projectId: project.id })}
+                  onEdit={(note) =>
+                    setNoteDraft({ projectId: project.id, note })
+                  }
+                  onOpenTask={(id) => setDetailId(id)}
+                  onChanged={materialsChanged}
+                />
+              ) : projectModule === "documents" ? (
+                <div className="space-y-8 pt-8">
+                  <Deliverables
+                    key={
+                      "deliverables:" +
+                      (project?.id || "") +
+                      ":" +
+                      (user?.id || "guest") +
+                      ":" +
+                      notesRevision
+                    }
+                    project={project}
+                    user={user}
+                    members={people}
+                    onChanged={materialsChanged}
+                    onAddNote={(item) =>
+                      setNoteDraft({
+                        projectId: project.id,
+                        draft: { deliverable_id: item.id },
+                      })
+                    }
+                  />
                   <ProjectLibrary
                     key={(project?.id || "") + ":" + (user?.id || "guest")}
                     project={project}
                     user={user}
                     records={projectRecords}
                     members={people}
+                    revision={libraryRevision}
                     onLogin={() => setModal({ type: "auth" })}
-                  />
-                  <Deliverables
-                    key={
-                      "deliverables:" +
-                      (project?.id || "") +
-                      ":" +
-                      (user?.id || "guest")
-                    }
-                    project={project}
-                    user={user}
-                    members={people}
                   />
                 </div>
               ) : projectModule === "resources" ? (
@@ -937,8 +993,46 @@ export default function App() {
           onAddChild={addChild}
           onLogin={() => setModal({ type: "auth" })}
           onChanged={contentChanged}
+          materialsRevision={notesRevision}
+          onAddNote={(r) =>
+            setNoteDraft({
+              projectId: r.project_id,
+              draft: { task_id: r.id },
+            })
+          }
         />
       )}
+      {noteDraft &&
+        user &&
+        projects.find((p) => p.id === noteDraft.projectId) && (
+          <NoteDialog
+            key={noteDraft.note?.id || "new"}
+            project={projects.find((p) => p.id === noteDraft.projectId)}
+            user={user}
+            records={records}
+            people={[
+              ...new Set([
+                ...(state.members || []),
+                ...availablePeople(
+                  projects.find((p) => p.id === noteDraft.projectId),
+                  records.filter((r) => r.project_id === noteDraft.projectId),
+                  user,
+                ),
+              ]),
+            ]}
+            note={noteDraft.note}
+            draft={noteDraft.draft}
+            onClose={() => setNoteDraft(null)}
+            onSaved={async (_note, { keepOpen } = {}) => {
+              setNotesRevision((n) => n + 1);
+              materialsChanged();
+              if (!keepOpen) {
+                setNoteDraft(null);
+                notify("随手记已保存");
+              }
+            }}
+          />
+        )}
       {modal?.type === "auth" && (
         <AuthDialog
           onClose={() => setModal(null)}
@@ -1014,9 +1108,27 @@ export default function App() {
               await api("/projects/" + modal.project.id, "PATCH", b);
               await saved("项目设置已保存");
             } else {
-              const result = await api("/projects", "POST", b);
+              const { checklist, ...fields } = b;
+              const result = await api("/projects", "POST", fields);
               choose({ id: result.id });
-              await saved("项目已创建");
+              let message = "项目已创建";
+              if (checklist)
+                try {
+                  const applied = await api(
+                    "/projects/" + result.id + "/deliverables/apply",
+                    "POST",
+                    checklist.startsWith("template:")
+                      ? { template_id: checklist.slice(9) }
+                      : { kind: checklist },
+                  );
+                  message += "，已生成 " + applied.added + " 项资料清单";
+                } catch (e) {
+                  message +=
+                    "；资料清单未生成（" +
+                    e.message +
+                    "），可在项目资料中重新套用";
+                }
+              await saved(message);
             }
           }}
         />

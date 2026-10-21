@@ -24,6 +24,7 @@ import {
   beijingDate,
 } from "../model.js";
 import { download, exportPicture } from "../picture.js";
+import { PROJECT_KINDS } from "../checklist.js";
 import {
   AvatarChip,
   DateBadge,
@@ -368,7 +369,9 @@ export function ProjectDialog({
   onSave,
   onReload,
 }) {
-  const [color, setColor] = useState(project?.color || "indigo"),
+  const [checklist, setChecklist] = useState(""),
+    [templates, setTemplates] = useState([]),
+    [color, setColor] = useState(project?.color || "indigo"),
     [members, setMembers] = useState(project?.members || []),
     [archived, setArchived] = useState(Boolean(project?.archived)),
     [entry, setEntry] = useState(""),
@@ -393,7 +396,7 @@ export function ProjectDialog({
         name,
         color,
         members: [...new Set([...members, ...splitNames(entry)])],
-        ...(project ? { archived } : {}),
+        ...(project ? { archived } : { checklist }),
         version: project?.version,
       });
     } catch (e) {
@@ -530,6 +533,36 @@ export function ProjectDialog({
               用于填写时快捷选择姓名，移除不会改动历史记录。
             </p>
           </fieldset>
+          {!project && (
+            <Field
+              label="资料清单"
+              hint="按项目类型生成应交资料清单（合同、配置记录、验收单等），之后可在“项目资料”中增删。"
+            >
+              <select
+                value={checklist}
+                onChange={(e) => setChecklist(e.target.value)}
+                onFocus={() => {
+                  if (!templates.length)
+                    api("/checklist-templates")
+                      .then((r) => setTemplates(r.templates))
+                      .catch(() => {});
+                }}
+                className={inputClass}
+              >
+                <option value="">暂不生成</option>
+                {PROJECT_KINDS.map((k) => (
+                  <option key={k.id} value={k.id}>
+                    {k.label}
+                  </option>
+                ))}
+                {templates.map((t) => (
+                  <option key={t.id} value={"template:" + t.id}>
+                    模板：{t.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
           {project && (
             <label className="flex cursor-pointer items-start gap-2 rounded-2xl border border-slate-200 bg-slate-50/50 p-4 text-[13px] text-slate-600">
               <input

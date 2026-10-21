@@ -6,6 +6,8 @@ import { pipeline } from "node:stream/promises";
 import { libraryFail as fail, libraryTx as tx, resourceEvent } from "./library-common.mjs";
 import { createStorage, safeFilename, relativeParts, streamZip, zip32Size } from "./storage.mjs";
 import { createUploads } from "./uploads.mjs";
+import { installNotesSchema } from "./notes.mjs";
+import { starterItems, PROJECT_KINDS, checklistProgress } from "./src/checklist.js";
 
 const now = () => new Date().toISOString();
 const text = (value, name, maximum, fallback = "") => {
@@ -37,7 +39,13 @@ export function installDocumentSchema(db) {
     CREATE TRIGGER IF NOT EXISTS document_release_items_immutable_replace BEFORE INSERT ON document_release_items WHEN EXISTS(SELECT 1 FROM document_release_items WHERE release_id=NEW.release_id AND document_id=NEW.document_id) BEGIN SELECT RAISE(ABORT,'Document release items are immutable'); END;
     CREATE TRIGGER IF NOT EXISTS document_release_voids_immutable_update BEFORE UPDATE ON document_release_voids BEGIN SELECT RAISE(ABORT,'Release void events are immutable'); END;
     CREATE TRIGGER IF NOT EXISTS document_release_voids_immutable_delete BEFORE DELETE ON document_release_voids BEGIN SELECT RAISE(ABORT,'Release void events are immutable'); END;
-    CREATE TRIGGER IF NOT EXISTS document_release_voids_immutable_replace BEFORE INSERT ON document_release_voids WHEN EXISTS(SELECT 1 FROM document_release_voids WHERE release_id=NEW.release_id) BEGIN SELECT RAISE(ABORT,'Release void events are immutable'); END;`);
+    CREATE TRIGGER IF NOT EXISTS document_release_voids_immutable_replace BEFORE INSERT ON document_release_voids WHEN EXISTS(SELECT 1 FROM document_release_voids WHERE release_id=NEW.release_id) BEGIN SELECT RAISE(ABORT,'Release void events are immutable'); END;
+    CREATE TABLE IF NOT EXISTS checklist_templates(id TEXT PRIMARY KEY,name TEXT NOT NULL,items_json TEXT NOT NULL,creator_id TEXT NOT NULL REFERENCES users(id),creator_name TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,deleted INTEGER NOT NULL DEFAULT 0,created TEXT NOT NULL,updated TEXT NOT NULL);
+    CREATE UNIQUE INDEX IF NOT EXISTS checklist_template_names ON checklist_templates(name) WHERE deleted=0;`);
+  const deliverableColumns = db.prepare("PRAGMA table_info(document_deliverables)").all().map((c) => c.name);
+  for (const [column, definition] of [["stage", "TEXT NOT NULL DEFAULT ''"], ["required", "INTEGER NOT NULL DEFAULT 0"], ["hint", "TEXT NOT NULL DEFAULT ''"], ["sort", "INTEGER NOT NULL DEFAULT 0"]])
+    if (!deliverableColumns.includes(column)) db.exec("ALTER TABLE document_deliverables ADD COLUMN " + column + " " + definition);
+  installNotesSchema(db);
 }
 
 export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaBytes, minFreeBytes }) {
@@ -116,33 +124,101 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
     return result;
   } });
 
+  function presentDeliverable(item) {
+    const d = item.document_id ? get("SELECT * FROM documents WHERE id=?", item.document_id) : null;
+    const resolvedId = item.version_id || d?.published_version_id || null;
+    const v = d && resolvedId ? version(d.id, resolvedId) : null;
+    const noteCount = get("SELECT COUNT(*) n FROM project_notes WHERE deliverable_id=? AND deleted=0", item.id).n;
+    // A site-log entry is real evidence for an item even before any file exists.
+    const status = !item.applicable ? "not-applicable" : d && !d.deleted ? (resolvedId ? "ready" : "draft") : noteCount ? "recorded" : "missing";
+    return { ...item, applicable: Boolean(item.applicable), required: Boolean(item.required), status, note_count: noteCount, reference_mode: item.version_id ? "fixed" : "published", resolved_version_id: resolvedId, document_title: d?.title || "", document_deleted: Boolean(d?.deleted), working_version_id: d && !d.deleted ? d.current_version_id : null, filename: v?.filename || "", number: v?.number || null };
+  }
+  const deliverableItems = (projectId) => all("SELECT * FROM document_deliverables WHERE project_id=? AND deleted=0 ORDER BY sort,created,id", projectId).map(presentDeliverable);
+  const nextSort = (projectId) => get("SELECT COALESCE(MAX(sort),0)+1 n FROM document_deliverables WHERE project_id=?", projectId).n;
+  const presentTemplate = (t) => ({ id: t.id, name: t.name, items: JSON.parse(t.items_json), creator_name: t.creator_name, version: t.version, created: t.created });
+  // Missing required items per project, for the navigation badge.
+  function checklistSummary() {
+    const summary = {};
+    for (const { project_id } of all("SELECT DISTINCT project_id FROM document_deliverables WHERE deleted=0 AND required=1 AND applicable=1")) summary[project_id] = checklistProgress(deliverableItems(project_id));
+    return summary;
+  }
   async function api(input) {
     const route = input.route.replace(/^\/api(?=\/)/, "");
     const { method, b = {}, user } = input;
     const params = input.params || new URLSearchParams();
-    if (!/^\/(?:documents|folders|uploads|releases|deliverables|projects\/[^/]+\/(?:documents|folders|releases|deliverables))(?:\/|$)/.test(route)) return null;
+    if (!/^\/(?:documents|folders|uploads|releases|deliverables|checklist-templates|projects\/[^/]+\/(?:documents|folders|releases|deliverables))(?:\/|$)/.test(route)) return null;
     auth(user);
     const uploadResult = await uploads.api({ ...input, route }); if (uploadResult) return uploadResult;
+    const applyMatch = route.match(/^\/projects\/([\w-]+)\/deliverables\/apply$/);
+    if (applyMatch && method === "POST") {
+      const projectId = project(applyMatch[1]).id;
+      let items, name;
+      if (b.template_id) {
+        const t = typeof b.template_id === "string" && get("SELECT * FROM checklist_templates WHERE id=? AND deleted=0", b.template_id);
+        if (!t) fail(404, "清单模板不存在或已删除");
+        items = JSON.parse(t.items_json); name = t.name;
+      } else {
+        const kind = PROJECT_KINDS.find((k) => k.id === b.kind);
+        if (!kind) fail(400, "请选择项目类型");
+        items = starterItems(kind.id); name = kind.label;
+      }
+      const added = tx(db, () => {
+        const existing = new Set(all("SELECT title FROM document_deliverables WHERE project_id=? AND deleted=0", projectId).map((r) => r.title));
+        let count = 0;
+        for (const item of items) {
+          if (existing.has(item.title)) continue;
+          existing.add(item.title);
+          run("INSERT INTO document_deliverables(id,project_id,title,owner,applicable,stage,required,hint,sort,created,updated) VALUES(?,?,?,?,1,?,?,?,?,?,?)", randomUUID(), projectId, item.title, "", item.stage || "", Number(Boolean(item.required)), item.hint || "", nextSort(projectId), now(), now());
+          count++;
+        }
+        resourceEvent(db, user, { action: "apply-checklist", entityType: "checklist", entityId: projectId, projectId, details: { name, count } });
+        return count;
+      });
+      const list = deliverableItems(projectId);
+      return { data: { added, items: list, progress: checklistProgress(list) } };
+    }
+    const templateList = route === "/checklist-templates";
+    const templateItem = route.match(/^\/checklist-templates\/([\w-]+)$/);
+    if (templateList && method === "GET") return { data: { templates: all("SELECT * FROM checklist_templates WHERE deleted=0 ORDER BY name").map(presentTemplate) } };
+    if (templateList && method === "POST") {
+      const name = text(b.name, "模板名称", 60); if (!name) fail(400, "请填写模板名称");
+      const projectId = project(b.project_id).id;
+      const items = all("SELECT title,stage,required,hint FROM document_deliverables WHERE project_id=? AND deleted=0 AND applicable=1 ORDER BY sort,created,id", projectId).map((r) => ({ ...r, required: Boolean(r.required) }));
+      if (!items.length) fail(400, "清单为空，先添加资料项再保存为模板");
+      if (get("SELECT id FROM checklist_templates WHERE name=? AND deleted=0", name)) fail(409, "已有同名模板");
+      const id = randomUUID();
+      tx(db, () => {
+        run("INSERT INTO checklist_templates(id,name,items_json,creator_id,creator_name,created,updated) VALUES(?,?,?,?,?,?,?)", id, name, JSON.stringify(items), user.id, user.name, now(), now());
+        resourceEvent(db, user, { action: "create-template", entityType: "checklist-template", entityId: id, projectId, details: { name, count: items.length } });
+      });
+      return { status: 201, data: { template: presentTemplate(get("SELECT * FROM checklist_templates WHERE id=?", id)) } };
+    }
+    if (templateItem && method === "DELETE") {
+      const t = get("SELECT * FROM checklist_templates WHERE id=? AND deleted=0", templateItem[1]); if (!t) fail(404, "清单模板不存在或已删除");
+      checkVersion(t, b);
+      tx(db, () => {
+        run("UPDATE checklist_templates SET deleted=1,version=version+1,updated=? WHERE id=?", now(), t.id);
+        resourceEvent(db, user, { action: "delete-template", entityType: "checklist-template", entityId: t.id, details: { name: t.name } });
+      });
+      return { data: { ok: true } };
+    }
+    if (templateList || templateItem) fail(405, "不支持的清单模板操作");
     const deliverableList = route.match(/^\/projects\/([\w-]+)\/deliverables$/);
     const deliverableItem = route.match(/^\/deliverables\/([\w-]+)$/);
     if (deliverableList || deliverableItem) {
       const old = deliverableItem ? get("SELECT * FROM document_deliverables WHERE id=? AND deleted=0", deliverableItem[1]) : null;
       if (deliverableItem && !old) fail(404, "交接清单条目不存在");
       const projectId = old?.project_id || deliverableList[1]; project(projectId);
-      const present = (item) => {
-        const d = item.document_id ? get("SELECT * FROM documents WHERE id=?", item.document_id) : null;
-        const resolvedId = item.version_id || d?.published_version_id || null;
-        const v = d && resolvedId ? version(d.id, resolvedId) : null;
-        const status = !item.applicable ? "not-applicable" : !d || d.deleted ? "missing" : resolvedId ? "ready" : "draft";
-        return { ...item, applicable: Boolean(item.applicable), status, reference_mode: item.version_id ? "fixed" : "published", resolved_version_id: resolvedId, document_title: d?.title || "", document_deleted: Boolean(d?.deleted), filename: v?.filename || "", number: v?.number || null };
-      };
-      if (deliverableList && method === "GET") return { data: { items: all("SELECT * FROM document_deliverables WHERE project_id=? AND deleted=0 ORDER BY created,id", projectId).map(present) } };
+      if (deliverableList && method === "GET") { const items = deliverableItems(projectId); return { data: { items, progress: checklistProgress(items) } }; }
       if ((deliverableList && method === "POST") || (deliverableItem && method === "PATCH")) {
         if (old) checkVersion(old, b);
         const title = text(b.title, "清单名称", 240, old?.title || ""); if (!title) fail(400, "请填写清单名称");
         const owner = text(b.owner, "维护人", 100, old?.owner || "");
         const applicable = b.applicable === undefined ? old?.applicable ?? true : b.applicable;
         if (![true, false, 0, 1].includes(applicable)) fail(400, "适用状态无效");
+        const required = b.required === undefined ? old?.required ?? false : b.required;
+        if (![true, false, 0, 1].includes(required)) fail(400, "必需标记无效");
+        const stage = text(b.stage, "阶段", 20, old?.stage || ""), hint = text(b.hint, "填写说明", 300, old?.hint || "");
         const documentId = b.document_id === undefined ? old?.document_id || null : b.document_id || null;
         const versionId = b.version_id === undefined ? (documentId === old?.document_id ? old?.version_id || null : null) : b.version_id || null;
         if (documentId && typeof documentId !== "string") fail(400, "关联文档无效");
@@ -151,11 +227,11 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
         if (versionId) version(documentId, versionId);
         const id = old?.id || randomUUID();
         tx(db, () => {
-          if (old) run("UPDATE document_deliverables SET title=?,owner=?,applicable=?,document_id=?,version_id=?,version=version+1,updated=? WHERE id=?", title, owner, Number(applicable), documentId, versionId, now(), id);
-          else run("INSERT INTO document_deliverables(id,project_id,title,owner,applicable,document_id,version_id,created,updated) VALUES(?,?,?,?,?,?,?,?,?)", id, projectId, title, owner, Number(applicable), documentId, versionId, now(), now());
-          event(user, old ? "update-deliverable" : "create-deliverable", id, projectId, { title, document_id: documentId, version_id: versionId });
+          if (old) run("UPDATE document_deliverables SET title=?,owner=?,applicable=?,document_id=?,version_id=?,stage=?,required=?,hint=?,version=version+1,updated=? WHERE id=?", title, owner, Number(applicable), documentId, versionId, stage, Number(required), hint, now(), id);
+          else run("INSERT INTO document_deliverables(id,project_id,title,owner,applicable,document_id,version_id,stage,required,hint,sort,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", id, projectId, title, owner, Number(applicable), documentId, versionId, stage, Number(required), hint, nextSort(projectId), now(), now());
+          event(user, old ? "update-deliverable" : "create-deliverable", id, projectId, { title, document_id: documentId, version_id: versionId, status: Number(required) ? "必需" : "选填" });
         });
-        return { status: old ? 200 : 201, data: { item: present(get("SELECT * FROM document_deliverables WHERE id=?", id)), id } };
+        return { status: old ? 200 : 201, data: { item: presentDeliverable(get("SELECT * FROM document_deliverables WHERE id=?", id)), id } };
       }
       if (deliverableItem && method === "DELETE") {
         checkVersion(old, b);
@@ -343,7 +419,7 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
     res.writeHead(200); if (input.method === "HEAD") res.end(); else await streamZip(res, entries);
     return true;
   }
-  return { api, binary, store, installSchema: () => installDocumentSchema(db) };
+  return { api, binary, store, checklistSummary, installSchema: () => installDocumentSchema(db) };
 }
 
 async function previewType(file, filename) {
