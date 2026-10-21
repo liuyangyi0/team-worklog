@@ -27,6 +27,7 @@ import {
   MessageSquare,
   ListTodo,
   Bell,
+  Archive,
 } from "lucide-react";
 import { AvatarChip, DateBadge, Popover, primary, secondary } from "./UI.jsx";
 import {
@@ -63,7 +64,62 @@ export function Sidebar({
   onNotifications,
 }) {
   const anchor = useRef(null),
-    [accountOpen, setAccountOpen] = useState(false);
+    [accountOpen, setAccountOpen] = useState(false),
+    [archivedOpen, setArchivedOpen] = useState(false);
+  const activeProjects = projects.filter((p) => !p.archived),
+    archivedProjects = projects.filter((p) => p.archived),
+    showArchived = archivedOpen || Boolean(project?.archived);
+  function projectEntry(p) {
+    const active = !overview && !todoActive && p.id === project?.id,
+      c = colorOf(p.color);
+    return (
+      <div key={p.id} className="project-entry relative">
+        <button
+          onClick={() => onSelect(p)}
+          aria-current={active ? "page" : undefined}
+          className={
+            "project-button group flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] transition-all " +
+            (active
+              ? "font-medium text-white shadow-lg shadow-black/15"
+              : "text-slate-400 hover:bg-white/5 hover:text-slate-200")
+          }
+          style={
+            active
+              ? {
+                  backgroundImage:
+                    "linear-gradient(100deg," + c.to + "b3," + c.to + "80)",
+                }
+              : undefined
+          }
+        >
+          <span
+            className={
+              "h-2 w-2 shrink-0 rounded-full " +
+              (active ? "ring-2 ring-white/40" : "opacity-70")
+            }
+            style={{
+              background: "linear-gradient(135deg," + c.from + "," + c.to + ")",
+            }}
+          />
+          <span className="truncate" title={p.name}>
+            {p.name}
+          </span>
+          {active && (
+            <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 opacity-70" />
+          )}
+        </button>
+        <button
+          type="button"
+          aria-label={"修改 " + p.name + " 标识色"}
+          title="修改项目标识色"
+          onClick={() => onSettings(p)}
+          className="absolute left-0 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-transparent hover:bg-slate-900/20 hover:text-white focus-visible:text-white"
+        >
+          <Palette className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    );
+  }
   return (
     <aside className="workbench-sidebar relative flex w-60 shrink-0 flex-col overflow-hidden bg-[#0C1322] text-slate-300">
       <div className="pointer-events-none absolute -left-20 -top-24 h-64 w-64 rounded-full bg-indigo-500/20 blur-3xl" />
@@ -132,62 +188,7 @@ export function Sidebar({
           我的项目
         </div>
         <nav aria-label="项目" className="project-nav space-y-1">
-          {projects.map((p) => {
-            const active = !overview && !todoActive && p.id === project?.id,
-              c = colorOf(p.color);
-            return (
-              <div key={p.id} className="project-entry relative">
-                <button
-                  onClick={() => onSelect(p)}
-                  aria-current={active ? "page" : undefined}
-                  className={
-                    "project-button group flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] transition-all " +
-                    (active
-                      ? "font-medium text-white shadow-lg shadow-black/15"
-                      : "text-slate-400 hover:bg-white/5 hover:text-slate-200")
-                  }
-                  style={
-                    active
-                      ? {
-                          backgroundImage:
-                            "linear-gradient(100deg," +
-                            c.to +
-                            "b3," +
-                            c.to +
-                            "80)",
-                        }
-                      : undefined
-                  }
-                >
-                  <span
-                    className={
-                      "h-2 w-2 shrink-0 rounded-full " +
-                      (active ? "ring-2 ring-white/40" : "opacity-70")
-                    }
-                    style={{
-                      background:
-                        "linear-gradient(135deg," + c.from + "," + c.to + ")",
-                    }}
-                  />
-                  <span className="truncate" title={p.name}>
-                    {p.name}
-                  </span>
-                  {active && (
-                    <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 opacity-70" />
-                  )}
-                </button>
-                <button
-                  type="button"
-                  aria-label={"修改 " + p.name + " 标识色"}
-                  title="修改项目标识色"
-                  onClick={() => onSettings(p)}
-                  className="absolute left-0 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-transparent hover:bg-slate-900/20 hover:text-white focus-visible:text-white"
-                >
-                  <Palette className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            );
-          })}
+          {activeProjects.map(projectEntry)}
         </nav>
         <button
           onClick={onNew}
@@ -196,6 +197,33 @@ export function Sidebar({
           <Plus className="h-4 w-4" />
           新建项目
         </button>
+        {archivedProjects.length > 0 && (
+          <div className="archived-projects mt-5 pb-3">
+            <button
+              type="button"
+              aria-expanded={showArchived}
+              onClick={() => setArchivedOpen(!showArchived)}
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-[11px] font-medium tracking-[0.14em] text-slate-500 hover:text-slate-300"
+            >
+              <Archive className="h-3.5 w-3.5" />
+              已归档 · {archivedProjects.length}
+              <ChevronDown
+                className={
+                  "ml-auto h-3.5 w-3.5 transition-transform " +
+                  (showArchived ? "rotate-180" : "")
+                }
+              />
+            </button>
+            {showArchived && (
+              <nav
+                aria-label="已归档项目"
+                className="mt-1 space-y-1 opacity-80"
+              >
+                {archivedProjects.map(projectEntry)}
+              </nav>
+            )}
+          </div>
+        )}
       </div>
       <div className="account-area relative p-3">
         {user ? (
@@ -645,7 +673,10 @@ export function DetailTable({
   onAddChild,
   capture = false,
   emptyAction,
+  selected,
+  onSelect,
 }) {
+  const selectable = Boolean(selected && onSelect && !capture);
   const [menu, setMenu] = useState(null),
     [expanded, setExpanded] = useState(new Set()),
     anchor = useRef(null),
@@ -658,6 +689,9 @@ export function DetailTable({
         visit(child, depth + 1);
   }
   records.forEach((r) => visit(r, 0));
+  const visibleIds = rows.map(({ record }) => record.id),
+    allVisibleSelected =
+      visibleIds.length > 0 && visibleIds.every((id) => selected?.has(id));
   function toggle(id) {
     setExpanded((old) => {
       const next = new Set(old);
@@ -678,7 +712,23 @@ export function DetailTable({
           </colgroup>
           <thead>
             <tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium tracking-wide text-slate-400">
-              <th className="rounded-tl-2xl px-6 py-3.5">工作事项</th>
+              <th className="rounded-tl-2xl px-6 py-3.5">
+                {selectable ? (
+                  <label className="inline-flex cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      aria-label="选择本页全部记录"
+                      checked={allVisibleSelected}
+                      disabled={!visibleIds.length}
+                      onChange={(e) => onSelect(visibleIds, e.target.checked)}
+                      className="row-select h-3.5 w-3.5 accent-indigo-600"
+                    />
+                    工作事项
+                  </label>
+                ) : (
+                  "工作事项"
+                )}
+              </th>
               <th className="px-4 py-3.5">原定负责人</th>
               <th className="px-4 py-3.5">实际完成人</th>
               <th className="px-4 py-3.5">完成日期</th>
@@ -702,7 +752,11 @@ export function DetailTable({
                   data-task-depth={depth}
                   className={
                     "group border-b border-slate-50 last:border-0 hover:bg-indigo-50/40 " +
-                    (depth ? "bg-slate-50/30" : "")
+                    (selected?.has(r.id)
+                      ? "bg-indigo-50/50"
+                      : depth
+                        ? "bg-slate-50/30"
+                        : "")
                   }
                 >
                   <td className="px-6 py-4">
@@ -710,6 +764,15 @@ export function DetailTable({
                       className="flex items-start gap-1.5"
                       style={{ paddingLeft: Math.min(depth, 5) * 12 }}
                     >
+                      {selectable && (
+                        <input
+                          type="checkbox"
+                          aria-label={"选择：" + r.task}
+                          checked={selected.has(r.id)}
+                          onChange={(e) => onSelect([r.id], e.target.checked)}
+                          className="row-select mt-1 h-3.5 w-3.5 shrink-0 accent-indigo-600"
+                        />
+                      )}
                       {children.length > 0 ? (
                         <button
                           aria-label={

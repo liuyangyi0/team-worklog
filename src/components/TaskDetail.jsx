@@ -160,6 +160,11 @@ export default function TaskDetail({
           <PriorityBadge value={record.priority} />
           <DueBadge record={record} />
         </div>
+        {record.description && (
+          <div className="task-description mt-4 whitespace-pre-wrap break-words rounded-2xl border border-slate-100 px-4 py-3 text-sm leading-relaxed text-slate-600">
+            {record.description}
+          </div>
+        )}
         <div className="mt-4 grid grid-cols-1 gap-4 rounded-2xl bg-slate-50 p-4 sm:grid-cols-3">
           {[
             ["原定负责人", splitNames(record.owner)],

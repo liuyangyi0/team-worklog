@@ -12,6 +12,7 @@ export const LOG_ACTIONS = {
 };
 export const LOG_FIELDS = {
   task: "工作事项",
+  description: "任务说明",
   owner: "原定负责人",
   actual: "实际完成人",
   date: "完成日期",
@@ -20,6 +21,7 @@ export const LOG_FIELDS = {
   name: "项目名称",
   color: "标识色",
   members: "常用成员",
+  archived: "归档状态",
   body: "评论内容",
   parent_task: "上级任务",
   dependency_titles: "前置任务",
@@ -30,11 +32,12 @@ export const LOG_FIELDS = {
 export function logChanges(entry) {
   const keys =
     entry.entityType === "project"
-      ? ["name", "color", "members"]
+      ? ["name", "color", "members", "archived"]
       : entry.entityType === "comment"
         ? ["body"]
         : [
             "task",
+            "description",
             "owner",
             "actual",
             "due_date",

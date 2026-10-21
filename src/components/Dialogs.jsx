@@ -12,6 +12,7 @@ import {
   Check,
   Plus,
   X,
+  ListChecks,
 } from "lucide-react";
 import { api } from "../api.js";
 import {
@@ -20,6 +21,7 @@ import {
   splitNames,
   statistics,
   PRIORITIES,
+  beijingDate,
 } from "../model.js";
 import { download, exportPicture } from "../picture.js";
 import {
@@ -207,6 +209,19 @@ export function RecordDialog({
               className={inputClass}
             />
           </Field>
+          <Field
+            label="任务说明（选填）"
+            hint="可补充背景、做法、验收标准或相关链接，最多 2000 字。"
+          >
+            <textarea
+              name="description"
+              rows={3}
+              maxLength={2000}
+              defaultValue={record?.description || ""}
+              placeholder="例如：需要对接的系统、交付要求"
+              className={inputClass}
+            />
+          </Field>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field label="优先级">
               <select
@@ -245,8 +260,8 @@ export function RecordDialog({
           <details
             open={Boolean(
               record?.dependency_ids?.length ||
-                record?.blocked ||
-                record?.support_people,
+              record?.blocked ||
+              record?.support_people,
             )}
             className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4"
           >
@@ -355,6 +370,7 @@ export function ProjectDialog({
 }) {
   const [color, setColor] = useState(project?.color || "indigo"),
     [members, setMembers] = useState(project?.members || []),
+    [archived, setArchived] = useState(Boolean(project?.archived)),
     [entry, setEntry] = useState(""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
@@ -377,6 +393,7 @@ export function ProjectDialog({
         name,
         color,
         members: [...new Set([...members, ...splitNames(entry)])],
+        ...(project ? { archived } : {}),
         version: project?.version,
       });
     } catch (e) {
@@ -513,6 +530,23 @@ export function ProjectDialog({
               用于填写时快捷选择姓名，移除不会改动历史记录。
             </p>
           </fieldset>
+          {project && (
+            <label className="flex cursor-pointer items-start gap-2 rounded-2xl border border-slate-200 bg-slate-50/50 p-4 text-[13px] text-slate-600">
+              <input
+                type="checkbox"
+                aria-label="归档此项目"
+                checked={archived}
+                onChange={(e) => setArchived(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0 accent-indigo-600"
+              />
+              <span>
+                归档此项目
+                <small className="mt-1 block text-[11px] leading-relaxed text-slate-400">
+                  项目结束后可归档：侧栏收进“已归档”，不再计入我的待办和到期提醒。记录、资料和日志全部保留，仍可查看和修改，随时可取消归档。
+                </small>
+              </span>
+            </label>
+          )}
         </div>
         <FormError error={error} onReload={onReload} />
         <FormActions
@@ -603,6 +637,181 @@ export function DeleteDialog({ record, onClose, onDelete, onReload }) {
         </div>
       </div>
       <FormError error={error} onReload={onReload} />
+      <div className="flex justify-end gap-2.5 px-6 py-5">
+        <button
+          onClick={onClose}
+          className="rounded-xl px-4 py-2 text-[13px] text-slate-500 hover:bg-slate-100"
+        >
+          再想想
+        </button>
+        <button
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await onDelete();
+            } catch (e) {
+              setError(e);
+            } finally {
+              setBusy(false);
+            }
+          }}
+          className="rounded-xl bg-gradient-to-b from-rose-500 to-rose-600 px-5 py-2 text-[13px] font-medium text-white shadow-lg shadow-rose-600/25 hover:shadow-xl disabled:opacity-50"
+        >
+          {busy ? "删除中…" : "确认删除"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+export function BatchDialog({ count, people, onClose, onSave }) {
+  const [actual, setActual] = useState([]),
+    [date, setDate] = useState(""),
+    [priority, setPriority] = useState(""),
+    [dueMode, setDueMode] = useState("keep"),
+    [due, setDue] = useState(""),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const changes = {
+    ...(actual.length ? { actual: actual.join("、") } : {}),
+    ...(date ? { date } : {}),
+    ...(priority ? { priority } : {}),
+    ...(dueMode === "clear"
+      ? { due_date: "" }
+      : dueMode === "set" && due
+        ? { due_date: due }
+        : {}),
+  };
+  async function submit(e) {
+    e.preventDefault();
+    if (!Object.keys(changes).length) return;
+    setBusy(true);
+    setError("");
+    try {
+      await onSave(changes);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal
+      title="批量修改"
+      sub={"已选 " + count + " 项 · 只修改填写的内容，其余保持不变"}
+      icon={ListChecks}
+      onClose={onClose}
+    >
+      <form onSubmit={submit}>
+        <div className="space-y-5 px-6 pb-2">
+          <PersonPicker
+            label="实际完成人（可多选）"
+            hint="选填；选择后会替换所选记录原有的实际完成人。"
+            selected={actual}
+            onChange={setActual}
+            people={people}
+            multi
+          />
+          <div className="flex items-end gap-2">
+            <div className="min-w-0 flex-1">
+              <Field label="完成日期（选填）">
+                <input
+                  type="date"
+                  aria-label="批量完成日期"
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
+                  className={inputClass}
+                />
+              </Field>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDate(beijingDate())}
+              className={secondary + " shrink-0 px-3"}
+            >
+              今天
+            </button>
+          </div>
+          <p className="-mt-3 text-xs leading-relaxed text-slate-400">
+            实际完成人或完成日期任填一项，所选记录即标记为完成。
+          </p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field label="优先级">
+              <select
+                aria-label="批量优先级"
+                value={priority}
+                onChange={(e) => setPriority(e.target.value)}
+                className={inputClass}
+              >
+                <option value="">保持不变</option>
+                {PRIORITIES.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <div>
+              <Field label="计划完成日期">
+                <select
+                  aria-label="批量计划日期方式"
+                  value={dueMode}
+                  onChange={(e) => setDueMode(e.target.value)}
+                  className={inputClass}
+                >
+                  <option value="keep">保持不变</option>
+                  <option value="set">设置为…</option>
+                  <option value="clear">清除计划日期</option>
+                </select>
+              </Field>
+              {dueMode === "set" && (
+                <input
+                  type="date"
+                  aria-label="批量计划完成日期"
+                  required
+                  value={due}
+                  onChange={(e) => setDue(e.target.value)}
+                  className={inputClass + " mt-2"}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+        <FormError error={error} />
+        <FormActions
+          onClose={onClose}
+          busy={busy}
+          disabled={!Object.keys(changes).length}
+          label={"应用到 " + count + " 项"}
+        />
+      </form>
+    </Modal>
+  );
+}
+export function BatchDeleteDialog({ records, onClose, onDelete }) {
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  return (
+    <Modal
+      title={"删除所选 " + records.length + " 项？"}
+      sub="子任务会一起删除，可通过提示一次撤销"
+      icon={Trash2}
+      tone="rose"
+      onClose={onClose}
+    >
+      <div className="px-6 pb-2">
+        <ul className="space-y-2 rounded-2xl bg-slate-50 p-4 text-sm text-slate-700 ring-1 ring-slate-100">
+          {records.slice(0, 6).map((r) => (
+            <li key={r.id} className="break-words">
+              · {r.task}
+            </li>
+          ))}
+          {records.length > 6 && (
+            <li className="text-xs text-slate-400">等共 {records.length} 项</li>
+          )}
+        </ul>
+      </div>
+      <FormError error={error} />
       <div className="flex justify-end gap-2.5 px-6 py-5">
         <button
           onClick={onClose}

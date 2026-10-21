@@ -161,7 +161,7 @@ export function notifyMentions(db, actor, task, text, previous = "") {
 export function ensureDueNotifications(db, date = beijingDate()) {
   for (const task of db
     .prepare(
-      "SELECT * FROM records WHERE deleted=0 AND due_date<>'' AND actual='' AND date=''",
+      "SELECT r.* FROM records r JOIN projects p ON p.id=r.project_id WHERE r.deleted=0 AND r.due_date<>'' AND r.actual='' AND r.date='' AND p.archived=0",
     )
     .all()) {
     const state = dueState(task, date);

@@ -629,7 +629,10 @@ dialog::backdrop {
   .filter-bar,
   .footer-tools,
   .exit-capture,
-  .row-menu-button {
+  .row-menu-button,
+  .batch-bar,
+  .row-select,
+  .archived-banner {
     display: none !important;
   }
   .wb-shell,
@@ -727,4 +730,6 @@ dialog::backdrop {
   }
 }
 
-.capture .project-module-nav { display: none !important; }
+.capture .project-module-nav {
+  display: none !important;
+}

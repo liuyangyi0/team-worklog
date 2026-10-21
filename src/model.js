@@ -197,6 +197,8 @@ export function filterRecords(
           (
             r.task +
             " " +
+            (r.description || "") +
+            " " +
             r.owner +
             " " +
             r.actual +
@@ -427,4 +429,40 @@ export function coordinationText(record) {
   ]
     .filter(Boolean)
     .join(" · ");
+}
+
+const CSV_COLUMNS = [
+  ["工作事项", (r) => r.task],
+  ["上级任务", (r, parents) => parents.get(r.parent_id)?.task || ""],
+  ["任务说明", (r) => r.description || ""],
+  ["状态", (r) => (isCompleted(r) ? "已完成" : "未完成")],
+  ["原定负责人", (r) => r.owner],
+  ["实际完成人", (r) => r.actual],
+  ["完成日期", (r) => r.date],
+  ["优先级", (r) => priorityOf(r.priority).label],
+  ["计划完成日期", (r) => r.due_date || ""],
+  ["推进状态", (r) => (dependencyInfo(r).blocked ? "阻塞中" : "")],
+  ["阻塞说明", (r) => (r.blocked ? r.blocker_note || "" : "")],
+  ["需要配合的人", (r) => r.support_people || ""],
+  ["前置任务", (r) => (r.dependency_tasks || []).map((t) => t.task).join("、")],
+  ["登记时间", (r) => (r.created ? beijingDate(new Date(r.created)) : "")],
+];
+function csvCell(value) {
+  let text = String(value ?? "");
+  // Spreadsheet apps evaluate cells that start with these characters.
+  if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
+  return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+export function recordsCsv(records, allRecords = records) {
+  const parents = new Map(allRecords.map((r) => [r.id, r]));
+  return (
+    "\ufeff" +
+    [
+      CSV_COLUMNS.map(([label]) => label),
+      ...records.map((r) => CSV_COLUMNS.map(([, value]) => value(r, parents))),
+    ]
+      .map((row) => row.map(csvCell).join(","))
+      .join("\r\n") +
+    "\r\n"
+  );
 }

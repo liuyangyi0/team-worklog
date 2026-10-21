@@ -18,6 +18,10 @@ import {
   X,
   Download,
   RefreshCw,
+  Archive,
+  ListChecks,
+  Trash2,
+  FileSpreadsheet,
 } from "lucide-react";
 import { api, useWorkbench } from "./api.js";
 import {
@@ -32,6 +36,7 @@ import {
   statistics,
   myTodos,
   priorityOf,
+  recordsCsv,
 } from "./model.js";
 import { Stats, primary, secondary } from "./components/UI.jsx";
 import {
@@ -48,6 +53,8 @@ import {
   PasswordDialog,
   DeleteDialog,
   ExportDialog,
+  BatchDialog,
+  BatchDeleteDialog,
 } from "./components/Dialogs.jsx";
 import { download } from "./picture.js";
 function listPreference(key, allowed, fallback) {
@@ -96,9 +103,20 @@ export default function App() {
     [modal, setModal] = useState(null),
     [toast, setToast] = useState(null),
     [capture, setCapture] = useState(false),
+    [selectedIds, setSelectedIds] = useState(() => new Set()),
     [logRevision, setLogRevision] = useState(0);
   const { user, projects, records } = state,
-    project = projects.find((p) => p.id === projectId) || projects[0];
+    project =
+      projects.find((p) => p.id === projectId) ||
+      projects.find((p) => !p.archived) ||
+      projects[0];
+  // Archived projects stay browsable but leave personal to-do lists.
+  const activeRecords = useMemo(() => {
+    const archived = new Set(
+      projects.filter((p) => p.archived).map((p) => p.id),
+    );
+    return records.filter((r) => !archived.has(r.project_id));
+  }, [projects, records]);
   const projectRecords = useMemo(
     () => records.filter((r) => r.project_id === project?.id),
     [records, project?.id],
@@ -142,6 +160,9 @@ export default function App() {
     () => taskTree(projectRecords, filtered, sort),
     [projectRecords, filtered, sort],
   );
+  const selectedRecords = user
+    ? projectRecords.filter((r) => selectedIds.has(r.id))
+    : [];
   const pg = pagination(tree.roots.length, page, pageSize),
     paged = capture
       ? tree.roots
@@ -201,6 +222,7 @@ export default function App() {
     setBlockedFilter("");
     setKeyword("");
     setPage(1);
+    setSelectedIds(new Set());
   }
   function choose(p) {
     setOverview(false);
@@ -218,6 +240,30 @@ export default function App() {
   function changeFilter(setter, value) {
     setter(value);
     setPage(1);
+    setSelectedIds(new Set());
+  }
+  function select(ids, checked) {
+    setSelectedIds((old) => {
+      const next = new Set(old);
+      for (const id of ids) checked ? next.add(id) : next.delete(id);
+      return next;
+    });
+  }
+  async function batch(action, changes) {
+    try {
+      return await api("/records/batch", "POST", {
+        action,
+        items: selectedRecords.map((r) => ({ id: r.id, version: r.version })),
+        ...(changes ? { changes } : {}),
+      });
+    } catch (e) {
+      if (e.status !== 409) throw e;
+      await refresh(true).catch(() => {});
+      throw Object.assign(
+        new Error("部分记录刚被他人修改或删除，列表已刷新，请确认后重新提交"),
+        { status: 409 },
+      );
+    }
   }
   useEffect(() => {
     try {
@@ -304,7 +350,7 @@ export default function App() {
         project={project}
         user={user}
         todoActive={todosView}
-        todoCount={myTodos(records, user?.name).length}
+        todoCount={myTodos(activeRecords, user?.name).length}
         unread={state.unread_notifications || 0}
         onTodos={() => {
           if (!user) return setModal({ type: "auth", next: { type: "todos" } });
@@ -336,7 +382,7 @@ export default function App() {
           <MyTodos
             key={user.id}
             user={user}
-            records={records}
+            records={activeRecords}
             projects={projects}
             loaded={loaded}
             error={error}
@@ -412,6 +458,34 @@ export default function App() {
                   </button>
                 ))}
               </nav>
+              {project?.archived ? (
+                <div
+                  role="note"
+                  className="archived-banner mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Archive className="h-3.5 w-3.5 shrink-0" />
+                    此项目已归档：内容仍可查看和修改，但不再计入我的待办和到期提醒。
+                  </span>
+                  {user && (
+                    <button
+                      className="shrink-0 font-medium underline-offset-2 hover:underline"
+                      onClick={() =>
+                        act(async () => {
+                          await api("/projects/" + project.id, "PATCH", {
+                            name: project.name,
+                            archived: false,
+                            version: project.version,
+                          });
+                          await saved("项目已取消归档");
+                        })
+                      }
+                    >
+                      取消归档
+                    </button>
+                  )}
+                </div>
+              ) : null}
               {projectModule === "documents" ? (
                 <div className="pt-8">
                   <ProjectLibrary
@@ -605,35 +679,79 @@ export default function App() {
                         正在加载记录…
                       </div>
                     ) : tab === "records" ? (
-                      <DetailTable
-                        records={paged}
-                        total={tree.roots.length}
-                        matchingTotal={filtered.length}
-                        tree={tree}
-                        allRecords={projectRecords}
-                        forceExpand={Boolean(
-                          keyword ||
+                      <>
+                        {selectedRecords.length > 0 && !capture && (
+                          <div
+                            role="toolbar"
+                            aria-label="批量操作"
+                            className="batch-bar mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-indigo-100 bg-indigo-50/70 px-4 py-2.5 text-xs text-indigo-700"
+                          >
+                            <span className="mr-auto font-medium">
+                              已选 {selectedRecords.length} 项
+                            </span>
+                            <button
+                              className={secondary + " px-3 py-1.5 text-xs"}
+                              onClick={() => setModal({ type: "batch" })}
+                            >
+                              <ListChecks className="h-3.5 w-3.5" />
+                              批量修改
+                            </button>
+                            <button
+                              className={
+                                secondary +
+                                " px-3 py-1.5 text-xs hover:text-rose-500"
+                              }
+                              onClick={() => setModal({ type: "batch-delete" })}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              批量删除
+                            </button>
+                            <button
+                              className="px-2 py-1.5 text-slate-400 hover:text-slate-600"
+                              onClick={() => setSelectedIds(new Set())}
+                            >
+                              取消选择
+                            </button>
+                          </div>
+                        )}
+                        <DetailTable
+                          records={paged}
+                          total={tree.roots.length}
+                          matchingTotal={filtered.length}
+                          tree={tree}
+                          allRecords={projectRecords}
+                          forceExpand={Boolean(
+                            keyword ||
                             month ||
                             peopleFilter.length ||
                             priorityFilter ||
                             dueFilter ||
                             blockedFilter,
-                        )}
-                        onOpen={(r) => setDetailId(r.id)}
-                        onAddChild={addChild}
-                        page={pg.page}
-                        pageSize={pageSize}
-                        onPageSize={(value) => changeFilter(setPageSize, value)}
-                        onPage={setPage}
-                        onEdit={(r) => setModal({ type: "record", record: r })}
-                        onDelete={(r) =>
-                          setModal({ type: "delete", record: r })
-                        }
-                        capture={capture}
-                        emptyAction={
-                          loaded ? () => requireUser({ type: "record" }) : null
-                        }
-                      />
+                          )}
+                          onOpen={(r) => setDetailId(r.id)}
+                          onAddChild={addChild}
+                          page={pg.page}
+                          pageSize={pageSize}
+                          onPageSize={(value) =>
+                            changeFilter(setPageSize, value)
+                          }
+                          onPage={setPage}
+                          onEdit={(r) =>
+                            setModal({ type: "record", record: r })
+                          }
+                          onDelete={(r) =>
+                            setModal({ type: "delete", record: r })
+                          }
+                          capture={capture}
+                          emptyAction={
+                            loaded
+                              ? () => requireUser({ type: "record" })
+                              : null
+                          }
+                          selected={user ? selectedIds : null}
+                          onSelect={select}
+                        />
+                      </>
                     ) : tab === "people" ? (
                       <PersonSummary records={filtered} capture={capture} />
                     ) : (
@@ -655,64 +773,88 @@ export default function App() {
                             ? "已登录，可修改全部内容 · 约每 30 秒同步"
                             : "所有人均可查看 · 注册登录后填写"}
                         </span>
-                        <button
-                          disabled={!loaded}
-                          onClick={() => {
-                            if (project)
-                              download(
-                                new Blob(
-                                  [
-                                    JSON.stringify(
-                                      {
-                                        project: project.name,
-                                        filter: filterLabel,
-                                        records: filtered.map(
-                                          ({
-                                            id,
-                                            parent_id,
-                                            task,
-                                            owner,
-                                            actual,
-                                            due_date,
-                                            priority,
-                                            dependency_ids,
-                                            dependency_tasks,
-                                            blocked,
-                                            blocker_note,
-                                            support_people,
-                                            date,
-                                          }) => ({
-                                            id,
-                                            parent_id,
-                                            task,
-                                            owner,
-                                            actual,
-                                            due_date,
-                                            priority,
-                                            dependency_ids,
-                                            dependency_tasks,
-                                            blocked,
-                                            blocker_note,
-                                            support_people,
-                                            date,
-                                          }),
-                                        ),
-                                      },
-                                      null,
-                                      2,
-                                    ),
-                                  ],
-                                  { type: "application/json" },
-                                ),
-                                project.name.replace(/[\\/:*?"<>|]/g, "_") +
-                                  "-工作记录.json",
-                              );
-                          }}
-                          className="inline-flex shrink-0 items-center gap-1 hover:text-indigo-500"
-                        >
-                          <Download className="h-3 w-3" />
-                          导出数据
-                        </button>
+                        <span className="flex shrink-0 items-center gap-3">
+                          <button
+                            disabled={!loaded}
+                            onClick={() => {
+                              if (project)
+                                download(
+                                  new Blob(
+                                    [recordsCsv(filtered, projectRecords)],
+                                    {
+                                      type: "text/csv;charset=utf-8",
+                                    },
+                                  ),
+                                  project.name.replace(/[\\/:*?"<>|]/g, "_") +
+                                    "-工作记录.csv",
+                                );
+                            }}
+                            className="inline-flex shrink-0 items-center gap-1 hover:text-indigo-500"
+                          >
+                            <FileSpreadsheet className="h-3 w-3" />
+                            导出表格
+                          </button>
+                          <button
+                            disabled={!loaded}
+                            onClick={() => {
+                              if (project)
+                                download(
+                                  new Blob(
+                                    [
+                                      JSON.stringify(
+                                        {
+                                          project: project.name,
+                                          filter: filterLabel,
+                                          records: filtered.map(
+                                            ({
+                                              id,
+                                              parent_id,
+                                              task,
+                                              description,
+                                              owner,
+                                              actual,
+                                              due_date,
+                                              priority,
+                                              dependency_ids,
+                                              dependency_tasks,
+                                              blocked,
+                                              blocker_note,
+                                              support_people,
+                                              date,
+                                            }) => ({
+                                              id,
+                                              parent_id,
+                                              task,
+                                              description,
+                                              owner,
+                                              actual,
+                                              due_date,
+                                              priority,
+                                              dependency_ids,
+                                              dependency_tasks,
+                                              blocked,
+                                              blocker_note,
+                                              support_people,
+                                              date,
+                                            }),
+                                          ),
+                                        },
+                                        null,
+                                        2,
+                                      ),
+                                    ],
+                                    { type: "application/json" },
+                                  ),
+                                  project.name.replace(/[\\/:*?"<>|]/g, "_") +
+                                    "-工作记录.json",
+                                );
+                            }}
+                            className="inline-flex shrink-0 items-center gap-1 hover:text-indigo-500"
+                          >
+                            <Download className="h-3 w-3" />
+                            导出数据
+                          </button>
+                        </span>
                       </div>
                     </footer>
                   )}
@@ -900,6 +1042,29 @@ export default function App() {
                 version: r.version,
               });
             await saved("记录已删除", { id: r.id, version: result.version });
+          }}
+        />
+      )}
+      {modal?.type === "batch" && project && (
+        <BatchDialog
+          count={selectedRecords.length}
+          people={people}
+          onClose={() => setModal(null)}
+          onSave={async (changes) => {
+            const result = await batch("update", changes);
+            setSelectedIds(new Set());
+            await saved("已批量修改 " + result.count + " 项");
+          }}
+        />
+      )}
+      {modal?.type === "batch-delete" && project && (
+        <BatchDeleteDialog
+          records={selectedRecords}
+          onClose={() => setModal(null)}
+          onDelete={async () => {
+            const result = await batch("delete");
+            setSelectedIds(new Set());
+            await saved("已删除 " + result.count + " 项", result.undo);
           }}
         />
       )}
