@@ -3,6 +3,10 @@ import Notifications from "./components/Notifications.jsx";
 import TaskDetail from "./components/TaskDetail.jsx";
 import PeopleOverview from "./components/PeopleOverview.jsx";
 import OperationLog from "./components/OperationLog.jsx";
+import ProjectLibrary from "./components/ProjectLibrary.jsx";
+import ProjectResources from "./components/ProjectResources.jsx";
+import ResourceEvents from "./components/ResourceEvents.jsx";
+import Deliverables from "./components/Deliverables.jsx";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Settings,
@@ -83,6 +87,12 @@ export default function App() {
       ),
     ),
     [tab, setTab] = useState("records"),
+    [projectModule, setProjectModule] = useState(() => {
+      const value = new URLSearchParams(location.search).get("module");
+      return ["documents", "resources", "resource-events"].includes(value)
+        ? value
+        : "records";
+    }),
     [modal, setModal] = useState(null),
     [toast, setToast] = useState(null),
     [capture, setCapture] = useState(false),
@@ -199,6 +209,7 @@ export default function App() {
     resetFilters();
     const u = new URL(location.href);
     u.searchParams.set("project", p.id);
+    u.searchParams.delete("document");
     history.replaceState(null, "", u);
   }
   function requireUser(next) {
@@ -367,265 +378,345 @@ export default function App() {
               )}
             </header>
             <div className="workbench-content mx-auto w-full max-w-5xl px-8 pb-12">
-              <div className="title-row flex items-end justify-between gap-5 pt-8">
-                <div>
-                  <h1 className="text-[28px] font-bold tracking-tight text-slate-900">
-                    工作完成记录
-                  </h1>
-                  <p className="mt-1.5 flex items-center gap-1.5 text-sm text-slate-400">
-                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
-                    原定谁负责，实际谁完成。
-                  </p>
-                  <p className="capture-project mt-3 hidden text-sm font-semibold text-slate-700">
-                    {project?.name}
-                  </p>
-                </div>
-                <div className="title-actions flex shrink-0 items-center gap-2.5">
-                  {tab !== "logs" && (
-                    <button
-                      disabled={!loaded || !project}
-                      className={secondary}
-                      onClick={() => setModal({ type: "export" })}
-                    >
-                      <ImageDown className="h-4 w-4" />
-                      导出图片
-                    </button>
-                  )}
-                  <button
-                    disabled={!loaded || !project}
-                    className={primary}
-                    onClick={() => requireUser({ type: "record" })}
-                  >
-                    <Plus className="h-4 w-4" strokeWidth={2.5} />
-                    记录完成
-                  </button>
-                </div>
-              </div>
-              {error && (
-                <div
-                  className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-600"
-                  role="alert"
-                >
-                  <span>暂时无法同步：{error}</span>
-                  <button
-                    className="inline-flex shrink-0 items-center gap-1"
-                    onClick={() => refresh(true).catch(() => {})}
-                  >
-                    <RefreshCw className="h-3 w-3" />
-                    重试
-                  </button>
-                </div>
-              )}
-              {tab !== "logs" && (
-                <Stats
-                  records={filtered}
-                  month={month}
-                  previousCount={previousCount}
-                />
-              )}
-              <div className="view-controls mt-8 flex flex-wrap items-center justify-between gap-3">
-                <div
-                  role="tablist"
-                  aria-label="记录视图"
-                  className="flex rounded-xl bg-slate-200/50 p-1"
-                >
-                  {[
-                    ["records", "完成明细"],
-                    ["people", "按人汇总"],
-                    ["logs", "操作日志"],
-                  ].map(([key, label]) => (
-                    <button
-                      key={key}
-                      role="tab"
-                      aria-selected={tab === key}
-                      onClick={() => {
-                        setCapture(false);
-                        setTab(key);
-                        setPage(1);
-                      }}
-                      className={
-                        "rounded-lg px-4 py-1.5 text-[13px] font-medium transition-all active:scale-95 " +
-                        (tab === key
-                          ? "bg-white text-slate-800 shadow-sm"
-                          : "text-slate-500 hover:text-slate-700")
-                      }
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {tab !== "logs" && (
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={() => setCapture(true)}
-                      className="screenshot-button inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-slate-400 hover:bg-white hover:text-slate-600"
-                    >
-                      <ScanLine className="h-3.5 w-3.5" />
-                      截图模式
-                    </button>
-                    <MonthSelect
-                      month={month}
-                      records={projectRecords}
-                      onChange={(m) => changeFilter(setMonth, m)}
-                    />
-                  </div>
-                )}
-              </div>
-              {tab !== "logs" && (
-                <Filters
-                  keyword={keyword}
-                  onKeyword={(v) => changeFilter(setKeyword, v)}
-                  people={actualPeople}
-                  selected={peopleFilter}
-                  onSelected={(v) => changeFilter(setPeopleFilter, v)}
-                  priority={priorityFilter}
-                  onPriority={(v) => changeFilter(setPriorityFilter, v)}
-                  blocked={blockedFilter}
-                  onBlocked={(v) => changeFilter(setBlockedFilter, v)}
-                  due={dueFilter}
-                  onDue={(v) => changeFilter(setDueFilter, v)}
-                  active={
-                    !!(
-                      keyword ||
-                      month ||
-                      peopleFilter.length ||
-                      priorityFilter ||
-                      dueFilter ||
-                      blockedFilter
-                    )
-                  }
-                  sort={tab === "records" ? sort : null}
-                  onSort={(value) => changeFilter(setSort, value)}
-                  onClear={resetFilters}
-                />
-              )}
-              <div className="capture-filter mt-5 hidden text-xs text-slate-500">
-                {filterLabel} · {tab === "people" ? "按人汇总" : "完成明细"}
-              </div>
-              <div
-                className="mt-4"
-                role="tabpanel"
-                aria-label={
-                  tab === "records"
-                    ? "完成明细"
-                    : tab === "people"
-                      ? "按人汇总"
-                      : "操作日志"
-                }
+              <nav
+                aria-label="项目模块"
+                className="project-module-nav mt-6 flex flex-wrap gap-1 rounded-xl border border-slate-200/70 bg-white/70 p-1 shadow-sm"
               >
-                {!loaded && !error ? (
-                  <div className="rounded-2xl border border-slate-200 bg-white py-20 text-center text-sm text-slate-400">
-                    正在加载记录…
-                  </div>
-                ) : tab === "records" ? (
-                  <DetailTable
-                    records={paged}
-                    total={tree.roots.length}
-                    matchingTotal={filtered.length}
-                    tree={tree}
-                    allRecords={projectRecords}
-                    forceExpand={Boolean(
-                      keyword ||
-                        month ||
-                        peopleFilter.length ||
-                        priorityFilter ||
-                        dueFilter ||
-                        blockedFilter,
-                    )}
-                    onOpen={(r) => setDetailId(r.id)}
-                    onAddChild={addChild}
-                    page={pg.page}
-                    pageSize={pageSize}
-                    onPageSize={(value) => changeFilter(setPageSize, value)}
-                    onPage={setPage}
-                    onEdit={(r) => setModal({ type: "record", record: r })}
-                    onDelete={(r) => setModal({ type: "delete", record: r })}
-                    capture={capture}
-                    emptyAction={
-                      loaded ? () => requireUser({ type: "record" }) : null
+                {[
+                  ["records", "工作记录"],
+                  ["documents", "项目资料"],
+                  ["resources", "资源与配置"],
+                  ["resource-events", "资料日志"],
+                ].map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    aria-current={projectModule === id ? "page" : undefined}
+                    onClick={() => {
+                      setProjectModule(id);
+                      setCapture(false);
+                      const next = new URL(location.href);
+                      next.searchParams.set("module", id);
+                      next.searchParams.delete("document");
+                      if (project) next.searchParams.set("project", project.id);
+                      history.replaceState(null, "", next);
+                    }}
+                    className={
+                      "rounded-lg px-4 py-2 text-[13px] font-medium transition-all " +
+                      (projectModule === id
+                        ? "bg-indigo-50 text-indigo-600 shadow-sm"
+                        : "text-slate-400 hover:bg-slate-50 hover:text-slate-700")
                     }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </nav>
+              {projectModule === "documents" ? (
+                <div className="pt-8">
+                  <ProjectLibrary
+                    key={(project?.id || "") + ":" + (user?.id || "guest")}
+                    project={project}
+                    user={user}
+                    records={projectRecords}
+                    members={people}
+                    onLogin={() => setModal({ type: "auth" })}
                   />
-                ) : tab === "people" ? (
-                  <PersonSummary records={filtered} capture={capture} />
-                ) : (
-                  <OperationLog project={project} revision={logRevision} />
-                )}
-              </div>
-              {tab !== "logs" && (
-                <footer className="mt-6">
-                  <p className="text-center text-xs leading-relaxed text-slate-400">
-                    实际完成人或完成日期任填一项即为完成，两项都空为未完成。
-                  </p>
-                  <p className="mt-2 text-center text-[11px] leading-relaxed text-slate-400">
-                    共同完成在每位参与者名下各计 1
-                    项；未完成不计入完成统计。有子任务时只统计子任务，父任务不重复计数。
-                  </p>
-                  <div className="footer-tools mt-5 flex items-center justify-between gap-4 text-[11px] text-slate-400">
-                    <span>
-                      {user
-                        ? "已登录，可修改全部内容 · 约每 30 秒同步"
-                        : "所有人均可查看 · 注册登录后填写"}
-                    </span>
-                    <button
-                      disabled={!loaded}
-                      onClick={() => {
-                        if (project)
-                          download(
-                            new Blob(
-                              [
-                                JSON.stringify(
-                                  {
-                                    project: project.name,
-                                    filter: filterLabel,
-                                    records: filtered.map(
-                                      ({
-                                        id,
-                                        parent_id,
-                                        task,
-                                        owner,
-                                        actual,
-                                        due_date,
-                                        priority,
-                                        dependency_ids,
-                                        dependency_tasks,
-                                        blocked,
-                                        blocker_note,
-                                        support_people,
-                                        date,
-                                      }) => ({
-                                        id,
-                                        parent_id,
-                                        task,
-                                        owner,
-                                        actual,
-                                        due_date,
-                                        priority,
-                                        dependency_ids,
-                                        dependency_tasks,
-                                        blocked,
-                                        blocker_note,
-                                        support_people,
-                                        date,
-                                      }),
-                                    ),
-                                  },
-                                  null,
-                                  2,
-                                ),
-                              ],
-                              { type: "application/json" },
-                            ),
-                            project.name.replace(/[\\/:*?"<>|]/g, "_") +
-                              "-工作记录.json",
-                          );
-                      }}
-                      className="inline-flex shrink-0 items-center gap-1 hover:text-indigo-500"
-                    >
-                      <Download className="h-3 w-3" />
-                      导出数据
-                    </button>
+                  <Deliverables
+                    key={
+                      "deliverables:" +
+                      (project?.id || "") +
+                      ":" +
+                      (user?.id || "guest")
+                    }
+                    project={project}
+                    user={user}
+                    members={people}
+                  />
+                </div>
+              ) : projectModule === "resources" ? (
+                <div className="pt-8">
+                  <ProjectResources
+                    key={(project?.id || "") + ":" + (user?.id || "guest")}
+                    project={project}
+                    user={user}
+                    records={projectRecords}
+                    members={people}
+                    onLogin={() => setModal({ type: "auth" })}
+                  />
+                </div>
+              ) : projectModule === "resource-events" ? (
+                <ResourceEvents
+                  key={(project?.id || "") + ":" + (user?.id || "guest")}
+                  project={project}
+                  user={user}
+                  onLogin={() => setModal({ type: "auth" })}
+                />
+              ) : (
+                <>
+                  <div className="title-row flex items-end justify-between gap-5 pt-8">
+                    <div>
+                      <h1 className="text-[28px] font-bold tracking-tight text-slate-900">
+                        工作完成记录
+                      </h1>
+                      <p className="mt-1.5 flex items-center gap-1.5 text-sm text-slate-400">
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                        原定谁负责，实际谁完成。
+                      </p>
+                      <p className="capture-project mt-3 hidden text-sm font-semibold text-slate-700">
+                        {project?.name}
+                      </p>
+                    </div>
+                    <div className="title-actions flex shrink-0 items-center gap-2.5">
+                      {tab !== "logs" && (
+                        <button
+                          disabled={!loaded || !project}
+                          className={secondary}
+                          onClick={() => setModal({ type: "export" })}
+                        >
+                          <ImageDown className="h-4 w-4" />
+                          导出图片
+                        </button>
+                      )}
+                      <button
+                        disabled={!loaded || !project}
+                        className={primary}
+                        onClick={() => requireUser({ type: "record" })}
+                      >
+                        <Plus className="h-4 w-4" strokeWidth={2.5} />
+                        记录完成
+                      </button>
+                    </div>
                   </div>
-                </footer>
+                  {error && (
+                    <div
+                      className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-600"
+                      role="alert"
+                    >
+                      <span>暂时无法同步：{error}</span>
+                      <button
+                        className="inline-flex shrink-0 items-center gap-1"
+                        onClick={() => refresh(true).catch(() => {})}
+                      >
+                        <RefreshCw className="h-3 w-3" />
+                        重试
+                      </button>
+                    </div>
+                  )}
+                  {tab !== "logs" && (
+                    <Stats
+                      records={filtered}
+                      month={month}
+                      previousCount={previousCount}
+                    />
+                  )}
+                  <div className="view-controls mt-8 flex flex-wrap items-center justify-between gap-3">
+                    <div
+                      role="tablist"
+                      aria-label="记录视图"
+                      className="flex rounded-xl bg-slate-200/50 p-1"
+                    >
+                      {[
+                        ["records", "完成明细"],
+                        ["people", "按人汇总"],
+                        ["logs", "操作日志"],
+                      ].map(([key, label]) => (
+                        <button
+                          key={key}
+                          role="tab"
+                          aria-selected={tab === key}
+                          onClick={() => {
+                            setCapture(false);
+                            setTab(key);
+                            setPage(1);
+                          }}
+                          className={
+                            "rounded-lg px-4 py-1.5 text-[13px] font-medium transition-all active:scale-95 " +
+                            (tab === key
+                              ? "bg-white text-slate-800 shadow-sm"
+                              : "text-slate-500 hover:text-slate-700")
+                          }
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    {tab !== "logs" && (
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => setCapture(true)}
+                          className="screenshot-button inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-slate-400 hover:bg-white hover:text-slate-600"
+                        >
+                          <ScanLine className="h-3.5 w-3.5" />
+                          截图模式
+                        </button>
+                        <MonthSelect
+                          month={month}
+                          records={projectRecords}
+                          onChange={(m) => changeFilter(setMonth, m)}
+                        />
+                      </div>
+                    )}
+                  </div>
+                  {tab !== "logs" && (
+                    <Filters
+                      keyword={keyword}
+                      onKeyword={(v) => changeFilter(setKeyword, v)}
+                      people={actualPeople}
+                      selected={peopleFilter}
+                      onSelected={(v) => changeFilter(setPeopleFilter, v)}
+                      priority={priorityFilter}
+                      onPriority={(v) => changeFilter(setPriorityFilter, v)}
+                      blocked={blockedFilter}
+                      onBlocked={(v) => changeFilter(setBlockedFilter, v)}
+                      due={dueFilter}
+                      onDue={(v) => changeFilter(setDueFilter, v)}
+                      active={
+                        !!(
+                          keyword ||
+                          month ||
+                          peopleFilter.length ||
+                          priorityFilter ||
+                          dueFilter ||
+                          blockedFilter
+                        )
+                      }
+                      sort={tab === "records" ? sort : null}
+                      onSort={(value) => changeFilter(setSort, value)}
+                      onClear={resetFilters}
+                    />
+                  )}
+                  <div className="capture-filter mt-5 hidden text-xs text-slate-500">
+                    {filterLabel} · {tab === "people" ? "按人汇总" : "完成明细"}
+                  </div>
+                  <div
+                    className="mt-4"
+                    role="tabpanel"
+                    aria-label={
+                      tab === "records"
+                        ? "完成明细"
+                        : tab === "people"
+                          ? "按人汇总"
+                          : "操作日志"
+                    }
+                  >
+                    {!loaded && !error ? (
+                      <div className="rounded-2xl border border-slate-200 bg-white py-20 text-center text-sm text-slate-400">
+                        正在加载记录…
+                      </div>
+                    ) : tab === "records" ? (
+                      <DetailTable
+                        records={paged}
+                        total={tree.roots.length}
+                        matchingTotal={filtered.length}
+                        tree={tree}
+                        allRecords={projectRecords}
+                        forceExpand={Boolean(
+                          keyword ||
+                            month ||
+                            peopleFilter.length ||
+                            priorityFilter ||
+                            dueFilter ||
+                            blockedFilter,
+                        )}
+                        onOpen={(r) => setDetailId(r.id)}
+                        onAddChild={addChild}
+                        page={pg.page}
+                        pageSize={pageSize}
+                        onPageSize={(value) => changeFilter(setPageSize, value)}
+                        onPage={setPage}
+                        onEdit={(r) => setModal({ type: "record", record: r })}
+                        onDelete={(r) =>
+                          setModal({ type: "delete", record: r })
+                        }
+                        capture={capture}
+                        emptyAction={
+                          loaded ? () => requireUser({ type: "record" }) : null
+                        }
+                      />
+                    ) : tab === "people" ? (
+                      <PersonSummary records={filtered} capture={capture} />
+                    ) : (
+                      <OperationLog project={project} revision={logRevision} />
+                    )}
+                  </div>
+                  {tab !== "logs" && (
+                    <footer className="mt-6">
+                      <p className="text-center text-xs leading-relaxed text-slate-400">
+                        实际完成人或完成日期任填一项即为完成，两项都空为未完成。
+                      </p>
+                      <p className="mt-2 text-center text-[11px] leading-relaxed text-slate-400">
+                        共同完成在每位参与者名下各计 1
+                        项；未完成不计入完成统计。有子任务时只统计子任务，父任务不重复计数。
+                      </p>
+                      <div className="footer-tools mt-5 flex items-center justify-between gap-4 text-[11px] text-slate-400">
+                        <span>
+                          {user
+                            ? "已登录，可修改全部内容 · 约每 30 秒同步"
+                            : "所有人均可查看 · 注册登录后填写"}
+                        </span>
+                        <button
+                          disabled={!loaded}
+                          onClick={() => {
+                            if (project)
+                              download(
+                                new Blob(
+                                  [
+                                    JSON.stringify(
+                                      {
+                                        project: project.name,
+                                        filter: filterLabel,
+                                        records: filtered.map(
+                                          ({
+                                            id,
+                                            parent_id,
+                                            task,
+                                            owner,
+                                            actual,
+                                            due_date,
+                                            priority,
+                                            dependency_ids,
+                                            dependency_tasks,
+                                            blocked,
+                                            blocker_note,
+                                            support_people,
+                                            date,
+                                          }) => ({
+                                            id,
+                                            parent_id,
+                                            task,
+                                            owner,
+                                            actual,
+                                            due_date,
+                                            priority,
+                                            dependency_ids,
+                                            dependency_tasks,
+                                            blocked,
+                                            blocker_note,
+                                            support_people,
+                                            date,
+                                          }),
+                                        ),
+                                      },
+                                      null,
+                                      2,
+                                    ),
+                                  ],
+                                  { type: "application/json" },
+                                ),
+                                project.name.replace(/[\\/:*?"<>|]/g, "_") +
+                                  "-工作记录.json",
+                              );
+                          }}
+                          className="inline-flex shrink-0 items-center gap-1 hover:text-indigo-500"
+                        >
+                          <Download className="h-3 w-3" />
+                          导出数据
+                        </button>
+                      </div>
+                    </footer>
+                  )}
+                </>
               )}
             </div>
           </>

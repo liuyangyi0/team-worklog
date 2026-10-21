@@ -726,3 +726,5 @@ dialog::backdrop {
     min-width: 130px;
   }
 }
+
+.capture .project-module-nav { display: none !important; }

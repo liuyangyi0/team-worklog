@@ -24,6 +24,9 @@ import {
   commentsAPI,
 } from "./tasks.mjs";
 import { installAuditSchema, appendAudit, readAudit } from "./audit.mjs";
+import { installLibraryCommon, readResourceEvents } from "./library-common.mjs";
+import { createDocuments } from "./documents.mjs";
+import { createResources } from "./resources.mjs";
 import http from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -114,6 +117,8 @@ export async function createApp({
   base = "/worklog",
   adminPassword = process.env.ADMIN_PASSWORD,
   dist = path.resolve("dist"),
+  filesDir = process.env.FILES_DIR,
+  vaultKey = process.env.VAULT_MASTER_KEY,
 } = {}) {
   fs.mkdirSync(dataDir, { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, "worklog.sqlite"));
@@ -168,6 +173,9 @@ export async function createApp({
   installAuditSchema(db);
   installPlanningSchema(db);
   installDependencySchema(db);
+  installLibraryCommon(db);
+  const documents = createDocuments({ db, dataDir, filesDir });
+  const resources = createResources({ db, dataDir, documents, vaultKey });
   const limits = new Map(),
     secure = origin.startsWith("https:");
   function rate(req, kind, max, period) {
@@ -233,12 +241,12 @@ export async function createApp({
     }
   }
   const canEdit = (user) => Boolean(user);
-  async function body(req) {
+  async function body(req, maxBytes = 65536) {
     const chunks = [];
     let size = 0;
     for await (const chunk of req) {
       size += chunk.length;
-      if (size > 65536) fail(413, "提交内容过大");
+      if (size > maxBytes) fail(413, "提交内容过大");
       chunks.push(chunk);
     }
     try {
@@ -253,7 +261,7 @@ export async function createApp({
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; frame-src blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
     );
     const json = (data, status = 200) => {
       res.writeHead(status, {
@@ -268,16 +276,54 @@ export async function createApp({
           ? url.pathname.slice(base.length)
           : url.pathname;
       if (route.startsWith("/api/")) {
-        if (req.method !== "GET") {
+        const chunkUpload =
+          req.method === "PUT" &&
+          /^\/api\/uploads\/[\w-]+\/chunks\/\d+$/.test(route);
+        if (!["GET", "HEAD"].includes(req.method)) {
           if (
             req.headers.origin !== origin ||
             req.headers["x-worklog-request"] !== "1" ||
-            !String(req.headers["content-type"]).startsWith("application/json")
+            !String(req.headers["content-type"]).startsWith(
+              chunkUpload ? "application/octet-stream" : "application/json",
+            )
           )
             fail(403, "请求来源不被允许，请刷新页面重试");
-          rate(req, "write", 180, 60000);
+          rate(
+            req,
+            chunkUpload
+              ? "file-upload"
+              : /^\/api\/uploads(?:\/|$)/.test(route)
+                ? "file-control"
+                : "write",
+            chunkUpload
+              ? 3600
+              : /^\/api\/uploads(?:\/|$)/.test(route)
+                ? 1200
+                : 180,
+            60000,
+          );
         }
         const user = currentUser(req);
+        if (
+          route === "/api/resource-events" ||
+          route.startsWith("/api/resource-events/")
+        ) {
+          if (!user) fail(401, "请先登录");
+          if (req.method !== "GET") fail(405, "操作日志不可修改或删除");
+          return json(readResourceEvents(db, url.searchParams));
+        }
+        if (
+          await documents.binary({
+            route,
+            method: req.method,
+            req,
+            res,
+            user,
+            json,
+            params: url.searchParams,
+          })
+        )
+          return;
         if (route === "/api/logs" && req.method === "GET")
           return json(readAudit(db, url.searchParams));
         if (
@@ -313,9 +359,33 @@ export async function createApp({
             ).map((r) => ({ ...r, editable: !!canEdit(user, r) })),
           });
         }
-        const b = req.method === "GET" ? {} : await body(req);
+        const configurationWrite =
+          /^\/api\/(?:projects\/[\w-]+\/configurations|configurations\/[\w-]+\/versions)$/.test(
+            route,
+          );
+        const credentialWrite =
+          /^\/api\/(?:projects\/[\w-]+\/credentials|credentials\/[\w-]+)$/.test(
+            route,
+          );
+        const b =
+          req.method === "GET"
+            ? {}
+            : await body(
+                req,
+                configurationWrite ? 4194304 : credentialWrite ? 262144 : 65536,
+              );
         if (!b || typeof b !== "object" || Array.isArray(b))
           fail(400, "请求格式错误");
+        for (const service of [documents, resources]) {
+          const result = await service.api({
+            route,
+            method: req.method,
+            params: url.searchParams,
+            b,
+            user,
+          });
+          if (result) return json(result.data, result.status || 200);
+        }
         const notificationResult = notificationsAPI(db, {
           route,
           method: req.method,
@@ -645,7 +715,8 @@ export async function createApp({
     }
   }, 60000);
   dueTimer.unref();
-  server.requestTimeout = 15000;
+  // Upload bodies are streamed in bounded chunks; allow slower connections.
+  server.requestTimeout = 120000;
   server.headersTimeout = 10000;
   return {
     server,

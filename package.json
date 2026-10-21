@@ -1,15 +1,16 @@
 {
   "name": "team-worklog",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "start": "node server.mjs",
-    "test": "node --test test.mjs tests/audit.test.mjs tests/collaboration.test.mjs tests/planning.test.mjs tests/dependencies.test.mjs",
+    "test": "node --test test.mjs tests/*.test.mjs",
     "format": "prettier --write src server.mjs audit.mjs registration.mjs backup.mjs test.mjs tests/audit.test.mjs tasks.mjs tests/collaboration.test.mjs planning.mjs tests/planning.test.mjs dependencies.mjs tests/dependencies.test.mjs",
-    "test:browser": "node tests/browser.cjs && node tests/collaboration.browser.cjs && node tests/planning.browser.cjs && node tests/dependencies.browser.cjs"
+    "test:browser": "node tests/run-browser.cjs",
+    "backup": "node backup.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.562.0",
