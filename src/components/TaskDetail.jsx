@@ -1,4 +1,5 @@
 import { DependencyDetail } from "./Relations.jsx";
+import { TaskMaterials } from "./SiteLog.jsx";
 import { PriorityBadge, DueBadge } from "./Planning.jsx";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -37,6 +38,8 @@ export default function TaskDetail({
   onLogin,
   onChanged,
   members = [],
+  materialsRevision = 0,
+  onAddNote,
 }) {
   const children = records.filter((r) => r.parent_id === record.id),
     parent = records.find((r) => r.id === record.parent_id);
@@ -201,6 +204,12 @@ export default function TaskDetail({
             </button>
           </div>
         )}
+        <TaskMaterials
+          record={record}
+          user={user}
+          revision={materialsRevision}
+          onAddNote={onAddNote}
+        />
         <DependencyDetail
           record={record}
           records={records}

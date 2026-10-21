@@ -27,6 +27,7 @@ import { installAuditSchema, appendAudit, readAudit } from "./audit.mjs";
 import { installLibraryCommon, readResourceEvents } from "./library-common.mjs";
 import { createDocuments } from "./documents.mjs";
 import { createResources } from "./resources.mjs";
+import { createNotes } from "./notes.mjs";
 import http from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -194,6 +195,7 @@ export async function createApp({
   installLibraryCommon(db);
   const documents = createDocuments({ db, dataDir, filesDir });
   const resources = createResources({ db, dataDir, documents, vaultKey });
+  const notes = createNotes({ db });
   const limits = new Map(),
     secure = origin.startsWith("https:");
   function rate(req, kind, max, period) {
@@ -259,6 +261,14 @@ export async function createApp({
     }
   }
   const canEdit = (user) => Boolean(user);
+  // The navigation badge is a convenience; never let it break the main state.
+  function checklistSummary() {
+    try {
+      return documents.checklistSummary();
+    } catch {
+      return {};
+    }
+  }
   function updateRecord(user, r, f) {
     const completedAt = isCompleted(f) ? r.completed_at || now() : "";
     run(
@@ -477,6 +487,7 @@ export async function createApp({
                 )
               : [],
             user,
+            checklist: user ? checklistSummary() : {},
             projects: all("SELECT * FROM projects ORDER BY created").map(
               (p) => ({ ...p, members: JSON.parse(p.members) }),
             ),
@@ -505,7 +516,7 @@ export async function createApp({
               );
         if (!b || typeof b !== "object" || Array.isArray(b))
           fail(400, "请求格式错误");
-        for (const service of [documents, resources]) {
+        for (const service of [documents, resources, notes]) {
           const result = await service.api({
             route,
             method: req.method,

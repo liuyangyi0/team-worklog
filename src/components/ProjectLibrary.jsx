@@ -84,7 +84,7 @@ export default function ProjectLibrary(props) {
     <LibrarySession key={props.project.id + ":" + props.user.id} {...props} />
   );
 }
-function LibrarySession({ project, user, records = [] }) {
+function LibrarySession({ project, user, records = [], revision = 0 }) {
   const [data, setData] = useState({ folders: [], documents: [] });
   const [folderId, setFolderId] = useState(null),
     [query, setQuery] = useState(""),
@@ -131,6 +131,9 @@ function LibrarySession({ project, user, records = [] }) {
     setLoaded(false);
     load();
   }, [trash]);
+  useEffect(() => {
+    if (revision) load();
+  }, [revision]);
   const folders = data.folders || [],
     documents = data.documents || [];
   const selectedFolder = folders.find((f) => f.id === folderId);
