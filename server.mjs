@@ -1,0 +1,676 @@
+import {
+  installDependencySchema,
+  hydrateRelations,
+  relationSnapshot,
+  relationFields,
+  saveRelations,
+  notifyRelations,
+  notifyDependents,
+} from "./dependencies.mjs";
+import {
+  installPlanningSchema,
+  planningFields,
+  notifyRecord,
+  ensureDueNotifications,
+  notificationsAPI,
+} from "./planning.mjs";
+import { registrationName } from "./registration.mjs";
+import { splitNames } from "./src/people.js";
+import { isCompleted } from "./src/model.js";
+import {
+  installTaskSchema,
+  validateParent,
+  activeDescendants,
+  commentsAPI,
+} from "./tasks.mjs";
+import { installAuditSchema, appendAudit, readAudit } from "./audit.mjs";
+import http from "node:http";
+import { DatabaseSync } from "node:sqlite";
+import {
+  randomBytes,
+  randomUUID,
+  scrypt,
+  createHash,
+  timingSafeEqual,
+} from "node:crypto";
+import { promisify } from "node:util";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+const derive = promisify(scrypt),
+  digest = (x) => createHash("sha256").update(x).digest("hex"),
+  now = () => new Date().toISOString();
+const fail = (status, message) => {
+  throw Object.assign(new Error(message), { status });
+};
+async function hashPassword(p) {
+  const salt = randomBytes(16).toString("hex");
+  return salt + ":" + (await derive(p, salt, 64)).toString("hex");
+}
+async function verifyPassword(p, stored) {
+  const [salt, h] = stored.split(":");
+  return timingSafeEqual(await derive(p, salt, 64), Buffer.from(h, "hex"));
+}
+function field(b, k, max = 80, optional = false) {
+  const v = b[k];
+  if (
+    typeof v !== "string" ||
+    v.trim().length > max ||
+    (!optional && !v.trim())
+  )
+    fail(400, "请检查填写内容");
+  return v.trim();
+}
+const projectColors = ["indigo", "emerald", "amber", "rose", "sky", "violet"];
+function projectFields(b, old = { color: "indigo", members: "[]" }) {
+  const color = b.color === undefined ? old.color : b.color;
+  if (!projectColors.includes(color)) fail(400, "项目标识色无效");
+  let members = b.members === undefined ? JSON.parse(old.members) : b.members;
+  if (
+    !Array.isArray(members) ||
+    members.length > 100 ||
+    members.some(
+      (x) => typeof x !== "string" || !x.trim() || x.trim().length > 30,
+    )
+  )
+    fail(400, "成员姓名需为 1–30 字，最多 100 人");
+  members = [...new Set(members.map((x) => x.trim()))];
+  return { color, members: JSON.stringify(members) };
+}
+function password(b, k = "password") {
+  const p = b[k];
+  if (typeof p !== "string" || p.length < 8 || p.length > 128)
+    fail(400, "密码需为 8–128 位");
+  return p;
+}
+function fields(b, old = {}) {
+  const task = field(b, "task", 300),
+    owner = splitNames(field(b, "owner", 300)).join("、"),
+    actual =
+      b.actual == null
+        ? ""
+        : splitNames(field(b, "actual", 300, true)).join("、"),
+    date = b.date == null ? "" : field(b, "date", 10, true);
+  if (
+    date &&
+    (!/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+      !Number.isFinite(Date.parse(date)) ||
+      new Date(date).toISOString().slice(0, 10) !== date)
+  )
+    fail(400, "完成日期无效");
+  if (!owner) fail(400, "请选择原定负责人");
+  return {
+    task,
+    owner,
+    actual,
+    date,
+    ...planningFields(b, old),
+    ...relationFields(b, old),
+  };
+}
+export async function createApp({
+  dataDir = process.env.DATA_DIR || "data",
+  origin = process.env.APP_ORIGIN || "http://127.0.0.1:8766",
+  base = "/worklog",
+  adminPassword = process.env.ADMIN_PASSWORD,
+  dist = path.resolve("dist"),
+} = {}) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  const db = new DatabaseSync(path.join(dataDir, "worklog.sqlite"));
+  db.exec(
+    "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+  );
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,login TEXT UNIQUE COLLATE NOCASE,name TEXT NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'member',created TEXT NOT NULL);" +
+      "CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),expires INTEGER NOT NULL);" +
+      "CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,creator TEXT REFERENCES users(id),version INTEGER NOT NULL DEFAULT 1,created TEXT NOT NULL);" +
+      "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),task TEXT NOT NULL,owner TEXT NOT NULL,actual TEXT NOT NULL,date TEXT NOT NULL DEFAULT '',creator TEXT NOT NULL REFERENCES users(id),created TEXT NOT NULL,updated TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,deleted INTEGER NOT NULL DEFAULT 0);" +
+      "CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,actor TEXT,action TEXT,entity TEXT,before_json TEXT,after_json TEXT,created TEXT);" +
+      "CREATE INDEX IF NOT EXISTS records_project ON records(project_id,deleted); CREATE INDEX IF NOT EXISTS session_expiry ON sessions(expires);",
+  );
+  const projectColumns = db
+    .prepare("PRAGMA table_info(projects)")
+    .all()
+    .map((c) => c.name);
+  if (!projectColumns.includes("color"))
+    db.exec(
+      "ALTER TABLE projects ADD COLUMN color TEXT NOT NULL DEFAULT 'indigo'",
+    );
+  if (!projectColumns.includes("members"))
+    db.exec(
+      "ALTER TABLE projects ADD COLUMN members TEXT NOT NULL DEFAULT '[]'",
+    );
+  const get = (sql, ...p) => db.prepare(sql).get(...p),
+    all = (sql, ...p) => db.prepare(sql).all(...p),
+    run = (sql, ...p) => db.prepare(sql).run(...p);
+  if (adminPassword && !get("SELECT id FROM users WHERE role='admin'")) {
+    password({ password: adminPassword });
+    run(
+      "INSERT INTO users VALUES(?,?,?,?,?,?)",
+      randomUUID(),
+      "admin",
+      "管理员",
+      await hashPassword(adminPassword),
+      "admin",
+      now(),
+    );
+  }
+  if (!get("SELECT id FROM projects LIMIT 1"))
+    run(
+      "INSERT INTO projects(id,name,creator,version,created) VALUES(?,?,?,?,?)",
+      randomUUID(),
+      "示例项目",
+      null,
+      1,
+      now(),
+    );
+  installTaskSchema(db);
+  installAuditSchema(db);
+  installPlanningSchema(db);
+  installDependencySchema(db);
+  const limits = new Map(),
+    secure = origin.startsWith("https:");
+  function rate(req, kind, max, period) {
+    const ip = req.headers["x-real-ip"] || req.socket.remoteAddress,
+      key = kind + ":" + ip;
+    let bucket = limits.get(key);
+    if (!bucket || bucket.until < Date.now()) {
+      bucket = { count: 0, until: Date.now() + period };
+      limits.set(key, bucket);
+    }
+    if (++bucket.count > max) fail(429, "操作较频繁，请稍后再试");
+    if (limits.size > 10000)
+      for (const [k, v] of limits) if (v.until < Date.now()) limits.delete(k);
+  }
+  function tokenOf(req) {
+    return (req.headers.cookie || "")
+      .split(";")
+      .map((x) => x.trim())
+      .find((x) => x.startsWith("worklog_session="))
+      ?.slice(16);
+  }
+  function currentUser(req) {
+    const token = tokenOf(req);
+    return token
+      ? get(
+          "SELECT u.id,u.login,u.name,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?",
+          digest(token),
+          Date.now(),
+        ) || null
+      : null;
+  }
+  function session(res, id) {
+    const token = randomBytes(32).toString("hex");
+    run("DELETE FROM sessions WHERE expires<?", Date.now());
+    run(
+      "INSERT INTO sessions VALUES(?,?,?)",
+      digest(token),
+      id,
+      Date.now() + 604800000,
+    );
+    res.setHeader(
+      "Set-Cookie",
+      "worklog_session=" +
+        token +
+        "; Path=" +
+        base +
+        "; HttpOnly; SameSite=Lax; Max-Age=604800" +
+        (secure ? "; Secure" : ""),
+    );
+  }
+  function audit(user, action, id, before, after) {
+    appendAudit(db, user, action, id, before, after);
+  }
+  function tx(fn) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const value = fn();
+      db.exec("COMMIT");
+      return value;
+    } catch (e) {
+      db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  const canEdit = (user) => Boolean(user);
+  async function body(req) {
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > 65536) fail(413, "提交内容过大");
+      chunks.push(chunk);
+    }
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    } catch {
+      fail(400, "请求格式错误");
+    }
+  }
+  const server = http.createServer(async (req, res) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "same-origin");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+    );
+    const json = (data, status = 200) => {
+      res.writeHead(status, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      res.end(JSON.stringify(data));
+    };
+    try {
+      const url = new URL(req.url, "http://localhost"),
+        route = url.pathname.startsWith(base + "/")
+          ? url.pathname.slice(base.length)
+          : url.pathname;
+      if (route.startsWith("/api/")) {
+        if (req.method !== "GET") {
+          if (
+            req.headers.origin !== origin ||
+            req.headers["x-worklog-request"] !== "1" ||
+            !String(req.headers["content-type"]).startsWith("application/json")
+          )
+            fail(403, "请求来源不被允许，请刷新页面重试");
+          rate(req, "write", 180, 60000);
+        }
+        const user = currentUser(req);
+        if (route === "/api/logs" && req.method === "GET")
+          return json(readAudit(db, url.searchParams));
+        if (
+          (route === "/api/logs" || route.startsWith("/api/logs/")) &&
+          req.method !== "GET"
+        )
+          fail(405, "操作日志不可修改或删除");
+        if (route === "/api/health" && req.method === "GET")
+          return json({ ok: true });
+        if (route === "/api/state" && req.method === "GET") {
+          if (user) ensureDueNotifications(db);
+          return json({
+            unread_notifications: user
+              ? get(
+                  "SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND read_at=''",
+                  user.id,
+                ).n
+              : 0,
+            members: user
+              ? all("SELECT DISTINCT name FROM users ORDER BY name").map(
+                  (u) => u.name,
+                )
+              : [],
+            user,
+            projects: all("SELECT * FROM projects ORDER BY created").map(
+              (p) => ({ ...p, members: JSON.parse(p.members) }),
+            ),
+            records: hydrateRelations(
+              db,
+              all(
+                "SELECT r.*,u.name AS creator_name,(SELECT COUNT(*) FROM records c WHERE c.parent_id=r.id AND c.deleted=0) AS child_count,(SELECT COUNT(*) FROM task_comments c WHERE c.record_id=r.id AND c.deleted=0) AS comment_count FROM records r JOIN users u ON r.creator=u.id WHERE r.deleted=0 ORDER BY r.created DESC",
+              ),
+            ).map((r) => ({ ...r, editable: !!canEdit(user, r) })),
+          });
+        }
+        const b = req.method === "GET" ? {} : await body(req);
+        if (!b || typeof b !== "object" || Array.isArray(b))
+          fail(400, "请求格式错误");
+        const notificationResult = notificationsAPI(db, {
+          route,
+          method: req.method,
+          params: url.searchParams,
+          b,
+          user,
+        });
+        if (notificationResult)
+          return json(
+            notificationResult.data,
+            notificationResult.status || 200,
+          );
+        const commentResult = commentsAPI(db, {
+          route,
+          method: req.method,
+          params: url.searchParams,
+          b,
+          user,
+        });
+        if (commentResult)
+          return json(commentResult.data, commentResult.status || 200);
+        if (route === "/api/register" && req.method === "POST") {
+          rate(req, "register", 12, 3600000);
+          const name = registrationName(b.name);
+          const login = field(b, "login", 32).toLowerCase(),
+            p = password(b);
+          if (!/^[a-z0-9_\-]{3,32}$/.test(login))
+            fail(400, "账号使用 3–32 位字母、数字、下划线或短横线");
+          if (get("SELECT id FROM users WHERE login=?", login))
+            fail(409, "这个账号已被使用");
+          const id = randomUUID(),
+            hash = await hashPassword(p);
+          try {
+            run(
+              "INSERT INTO users VALUES(?,?,?,?,?,?)",
+              id,
+              login,
+              name,
+              hash,
+              "member",
+              now(),
+            );
+          } catch (e) {
+            if (String(e).includes("UNIQUE")) fail(409, "这个账号已被使用");
+            throw e;
+          }
+          session(res, id);
+          return json({ ok: true }, 201);
+        }
+        if (route === "/api/login" && req.method === "POST") {
+          rate(req, "login", 40, 900000);
+          const login = field(b, "login", 32),
+            p = password(b),
+            target = get("SELECT * FROM users WHERE login=?", login);
+          if (!target) {
+            await derive(p, "worklog-dummy-salt", 64);
+            fail(401, "账号或密码不正确");
+          }
+          if (!(await verifyPassword(p, target.password)))
+            fail(401, "账号或密码不正确");
+          session(res, target.id);
+          return json({ ok: true });
+        }
+        if (!user) fail(401, "请先登录");
+        if (route === "/api/logout" && req.method === "POST") {
+          const token = tokenOf(req);
+          if (token) run("DELETE FROM sessions WHERE token=?", digest(token));
+          res.setHeader(
+            "Set-Cookie",
+            "worklog_session=; Path=" +
+              base +
+              "; HttpOnly; SameSite=Lax; Max-Age=0" +
+              (secure ? "; Secure" : ""),
+          );
+          return json({ ok: true });
+        }
+        if (route === "/api/password" && req.method === "POST") {
+          const old = password(b, "oldPassword"),
+            next = password(b);
+          if (
+            !(await verifyPassword(
+              old,
+              get("SELECT password FROM users WHERE id=?", user.id).password,
+            ))
+          )
+            fail(400, "原密码不正确");
+          run(
+            "UPDATE users SET password=? WHERE id=?",
+            await hashPassword(next),
+            user.id,
+          );
+          run("DELETE FROM sessions WHERE user_id=?", user.id);
+          session(res, user.id);
+          return json({ ok: true });
+        }
+        if (route === "/api/projects" && req.method === "POST") {
+          const name = field(b, "name", 60);
+          if (get("SELECT id FROM projects WHERE name=?", name))
+            fail(409, "已有同名项目");
+          const id = randomUUID(),
+            f = projectFields(b);
+          tx(() => {
+            run(
+              "INSERT INTO projects(id,name,creator,version,created,color,members) VALUES(?,?,?,?,?,?,?)",
+              id,
+              name,
+              user.id,
+              1,
+              now(),
+              f.color,
+              f.members,
+            );
+            audit(user, "create-project", id, null, { name, ...f });
+          });
+          return json({ id }, 201);
+        }
+        const pm = route.match(/^\/api\/projects\/([\w-]+)$/);
+        if (pm && req.method === "PATCH") {
+          const p = get("SELECT * FROM projects WHERE id=?", pm[1]);
+          if (!p) fail(404, "项目不存在");
+          if (!canEdit(user, p)) fail(403, "请先登录后修改项目");
+          if (b.version !== p.version) fail(409, "项目已被修改，请刷新后重试");
+          const name = field(b, "name", 60);
+          if (get("SELECT id FROM projects WHERE name=? AND id<>?", name, p.id))
+            fail(409, "已有同名项目");
+          const f = projectFields(b, p);
+          tx(() => {
+            run(
+              "UPDATE projects SET name=?,color=?,members=?,version=version+1 WHERE id=?",
+              name,
+              f.color,
+              f.members,
+              p.id,
+            );
+            audit(user, "update-project", p.id, p, { name, ...f });
+          });
+          return json({ ok: true });
+        }
+        if (route === "/api/records" && req.method === "POST") {
+          const f = fields(b);
+          if (
+            typeof b.project_id !== "string" ||
+            !get("SELECT id FROM projects WHERE id=?", b.project_id)
+          )
+            fail(404, "项目不存在");
+          const id = randomUUID();
+          const parent = validateParent(db, b.parent_id, b.project_id);
+          const completedAt = isCompleted(f) ? now() : "";
+          tx(() => {
+            run(
+              "INSERT INTO records(id,project_id,task,owner,actual,date,creator,created,updated,version,deleted,parent_id,completed_at,due_date,priority,blocked,blocker_note,support_people) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              id,
+              b.project_id,
+              f.task,
+              f.owner,
+              f.actual,
+              f.date,
+              user.id,
+              now(),
+              now(),
+              1,
+              0,
+              parent?.id || null,
+              completedAt,
+              f.due_date,
+              f.priority,
+              f.blocked,
+              f.blocker_note,
+              f.support_people,
+            );
+            saveRelations(db, id, f.dependency_ids);
+            notifyRelations(db, user, null, {
+              ...f,
+              id,
+              project_id: b.project_id,
+            });
+            notifyRecord(db, user, null, {
+              ...f,
+              id,
+              project_id: b.project_id,
+            });
+            audit(user, "create-record", id, null, {
+              ...f,
+              parent_id: parent?.id || null,
+              parent_task: parent?.task || "",
+            });
+          });
+          return json({ id }, 201);
+        }
+        const rm = route.match(/^\/api\/records\/([\w-]+)(\/restore)?$/);
+        if (rm && ["PATCH", "DELETE", "POST"].includes(req.method)) {
+          const r = relationSnapshot(
+            db,
+            get("SELECT * FROM records WHERE id=?", rm[1]),
+          );
+          if (!r) fail(404, "记录不存在");
+          if (!canEdit(user, r)) fail(403, "请先登录后修改记录");
+          if (b.version !== r.version)
+            fail(409, "这条记录已被修改，请刷新后重试");
+          if (rm[2] && req.method === "POST" && r.deleted) {
+            if (
+              r.parent_id &&
+              get("SELECT deleted FROM records WHERE id=?", r.parent_id)
+                ?.deleted
+            )
+              fail(409, "请先恢复上级任务");
+            tx(() => {
+              const restore = r.delete_group
+                ? all(
+                    "SELECT * FROM records WHERE delete_group=? AND deleted=1",
+                    r.delete_group,
+                  )
+                : [r];
+              for (const item of restore) {
+                run(
+                  "UPDATE records SET deleted=0,delete_group='',version=version+1,updated=? WHERE id=?",
+                  now(),
+                  item.id,
+                );
+                audit(user, "restore-record", item.id, item, null);
+                notifyDependents(db, user, item, { ...item, deleted: 0 });
+              }
+            });
+            return json({ ok: true });
+          }
+          if (r.deleted) fail(404, "记录已删除");
+          if (!rm[2] && req.method === "PATCH") {
+            const f = fields(b, r);
+            if (
+              b.parent_id !== undefined &&
+              (b.parent_id || null) !== r.parent_id
+            )
+              fail(400, "暂不支持调整上级任务");
+            const completedAt = isCompleted(f) ? r.completed_at || now() : "";
+            tx(() => {
+              run(
+                "UPDATE records SET task=?,owner=?,actual=?,date=?,due_date=?,priority=?,blocked=?,blocker_note=?,support_people=?,completed_at=?,version=version+1,updated=? WHERE id=?",
+                f.task,
+                f.owner,
+                f.actual,
+                f.date,
+                f.due_date,
+                f.priority,
+                f.blocked,
+                f.blocker_note,
+                f.support_people,
+                completedAt,
+                now(),
+                r.id,
+              );
+              saveRelations(db, r.id, f.dependency_ids, r.dependency_ids);
+              notifyRelations(db, user, r, { ...r, ...f });
+              notifyDependents(db, user, r, { ...r, ...f });
+              notifyRecord(db, user, r, { ...r, ...f });
+              audit(user, "update-record", r.id, r, {
+                ...f,
+                parent_id: r.parent_id,
+                parent_task: r.parent_id
+                  ? get("SELECT task FROM records WHERE id=?", r.parent_id)
+                      ?.task || ""
+                  : "",
+              });
+            });
+            return json({ ok: true });
+          }
+          if (!rm[2] && req.method === "DELETE") {
+            tx(() => {
+              const group = randomUUID();
+              for (const item of activeDescendants(db, r.id)) {
+                run(
+                  "UPDATE records SET deleted=1,delete_group=?,version=version+1,updated=? WHERE id=?",
+                  group,
+                  now(),
+                  item.id,
+                );
+                audit(user, "delete-record", item.id, item, null);
+                notifyDependents(db, user, item, { ...item, deleted: 1 });
+              }
+            });
+            return json({ ok: true, version: r.version + 1 });
+          }
+        }
+        fail(404, "接口不存在");
+      }
+      if (!["GET", "HEAD"].includes(req.method)) fail(405, "不支持的请求");
+      const rel =
+          route === "/" || route === ""
+            ? "index.html"
+            : decodeURIComponent(route).replace(/^\//, ""),
+        file = path.resolve(dist, rel);
+      if (
+        !file.startsWith(path.resolve(dist) + path.sep) ||
+        !fs.existsSync(file) ||
+        !fs.statSync(file).isFile()
+      )
+        fail(404, "页面不存在");
+      const types = {
+        ".html": "text/html; charset=utf-8",
+        ".js": "application/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".svg": "image/svg+xml",
+        ".png": "image/png",
+        ".woff2": "font/woff2",
+      };
+      res.writeHead(200, {
+        "Content-Type": types[path.extname(file)] || "application/octet-stream",
+        "Cache-Control":
+          rel === "index.html" ? "no-cache" : "public, max-age=86400",
+      });
+      if (req.method === "HEAD") res.end();
+      else fs.createReadStream(file).pipe(res);
+    } catch (e) {
+      if (!e.status) console.error("Request failed:", e.message);
+      if (!res.headersSent)
+        json(
+          { error: e.status ? e.message : "保存失败，请稍后重试" },
+          e.status || 500,
+        );
+      else res.end();
+    }
+  });
+  const dueTimer = setInterval(() => {
+    try {
+      ensureDueNotifications(db);
+    } catch (e) {
+      console.error("Due reminder failed:", e.message);
+    }
+  }, 60000);
+  dueTimer.unref();
+  server.requestTimeout = 15000;
+  server.headersTimeout = 10000;
+  return {
+    server,
+    db,
+    close: () =>
+      new Promise((resolve) =>
+        server.close(() => {
+          clearInterval(dueTimer);
+          db.close();
+          resolve();
+        }),
+      ),
+  };
+}
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  const app = await createApp();
+  app.server.listen(
+    Number(process.env.PORT || 8766),
+    process.env.HOST || "127.0.0.1",
+    () => console.log("Worklog ready"),
+  );
+  const stop = () => app.close().then(() => process.exit(0));
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+}

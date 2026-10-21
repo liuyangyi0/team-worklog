@@ -1,0 +1,25 @@
+[Unit]
+Description=Team Work Completion Records
+After=network.target
+[Service]
+Type=simple
+User=worklog
+Group=worklog
+WorkingDirectory=/srv/worklog/app
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=8766
+Environment=DATA_DIR=/srv/worklog/data
+Environment=APP_ORIGIN=https://worklog.example.com
+EnvironmentFile=-/srv/worklog/admin.env
+ExecStart=/usr/bin/node /srv/worklog/app/server.mjs
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/worklog/data
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+data/
+.private/
+.env
+.env.*
+!.env.example
+*.log
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.zip
+*.tar.gz
+.DS_Store
+Thumbs.db

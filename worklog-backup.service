@@ -1,0 +1,13 @@
+[Unit]
+Description=Backup worklog database
+[Service]
+Type=oneshot
+User=worklog
+Group=worklog
+Environment=DATA_DIR=/srv/worklog/data
+ExecStart=/usr/bin/node /srv/worklog/app/backup.mjs
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/worklog/data
