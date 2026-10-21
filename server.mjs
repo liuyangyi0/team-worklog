@@ -446,6 +446,12 @@ export async function createApp({
           }
           if (!(await verifyPassword(p, target.password)))
             fail(401, "账号或密码不正确");
+          // Verification is asynchronous: a concurrent password change must invalidate this login.
+          if (
+            get("SELECT password FROM users WHERE id=?", target.id)
+              ?.password !== target.password
+          )
+            fail(401, "账号或密码不正确");
           session(res, target.id);
           return json({ ok: true });
         }
@@ -465,20 +471,25 @@ export async function createApp({
         if (route === "/api/password" && req.method === "POST") {
           const old = password(b, "oldPassword"),
             next = password(b);
-          if (
-            !(await verifyPassword(
-              old,
-              get("SELECT password FROM users WHERE id=?", user.id).password,
-            ))
-          )
-            fail(400, "原密码不正确");
-          run(
-            "UPDATE users SET password=? WHERE id=?",
-            await hashPassword(next),
+          const previousHash = get(
+            "SELECT password FROM users WHERE id=?",
             user.id,
-          );
-          run("DELETE FROM sessions WHERE user_id=?", user.id);
-          session(res, user.id);
+          ).password;
+          if (!(await verifyPassword(old, previousHash)))
+            fail(400, "原密码不正确");
+          const nextHash = await hashPassword(next);
+          tx(() => {
+            const changed = run(
+              "UPDATE users SET password=? WHERE id=? AND password=?",
+              nextHash,
+              user.id,
+              previousHash,
+            );
+            if (changed.changes !== 1)
+              fail(409, "密码已被修改，请重新登录后重试");
+            run("DELETE FROM sessions WHERE user_id=?", user.id);
+            session(res, user.id);
+          });
           return json({ ok: true });
         }
         if (route === "/api/projects" && req.method === "POST") {

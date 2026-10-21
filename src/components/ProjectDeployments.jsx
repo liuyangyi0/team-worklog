@@ -156,7 +156,7 @@ export default function ProjectDeployments({
           .map((d) => (
             <div
               key={d.id}
-              className="rounded-2xl border border-slate-200/70 bg-white p-5 shadow-sm"
+              className="min-w-0 rounded-2xl border border-slate-200/70 bg-white p-5 shadow-sm"
             >
               <div className="flex items-start gap-3">
                 <div className="rounded-xl bg-indigo-50 p-2.5 text-indigo-400">
@@ -187,7 +187,7 @@ export default function ProjectDeployments({
                 <p className="break-all">
                   入口：{d.entry_url || d.network_address || "未填写"}
                 </p>
-                <p>
+                <p className="break-words">
                   版本：{d.deployed_version || "未登记"} · 维护人：
                   {d.maintainer || "未指定"}
                 </p>

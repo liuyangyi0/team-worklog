@@ -148,6 +148,10 @@ export function createProjectAssets(db) {
     db.exec(
       "ALTER TABLE resources ADD COLUMN field_values_json TEXT NOT NULL DEFAULT '{}'",
     );
+  if (!columns.includes("category_values_json"))
+    db.exec(
+      "ALTER TABLE resources ADD COLUMN category_values_json TEXT NOT NULL DEFAULT '{}'",
+    );
   function project(id) {
     if (!get("SELECT id FROM projects WHERE id=?", id)) fail(404, "项目不存在");
   }
@@ -269,6 +273,23 @@ export function createProjectAssets(db) {
     if (own(body, "category_version") && body.category_version !== def.version)
       fail(409, "分类字段已更新，请刷新表单后重试");
     const stored = old.field_values || json(old.field_values_json || "{}");
+    const history = {
+      ...(old.category_values || json(old.category_values_json || "{}")),
+    };
+    // Older versions used one flat map. Attribute its current-category fields
+    // on first edit, but keep the flat extras available for legacy readers.
+    if (old.category_id) {
+      const previous = categoryRow(old.category_id);
+      if (!own(history, old.category_id))
+        history[old.category_id] = Object.fromEntries(
+          previous.fields
+            .filter((f) => own(stored, f.key))
+            .map((f) => [f.key, stored[f.key]]),
+        );
+    }
+    const current = switched
+      ? history[id] || {}
+      : history[old.category_id] || stored;
     const supplied = own(body, "field_values")
       ? object(body.field_values, "自定义内容")
       : {};
@@ -276,28 +297,19 @@ export function createProjectAssets(db) {
     if (Object.keys(supplied).some((k) => !known.has(k)))
       fail(400, "包含当前分类以外的字段");
     const values = Object.create(null);
-    // Retain values from previous categories and disabled fields; never silently erase them.
+    // Flat extras preserve compatibility; per-category maps preserve colliding
+    // keys, including different types and options, when a resource switches.
     for (const [k, v] of Object.entries(stored)) values[k] = v;
+    const categoryValues = { ...(history[id] || {}) };
     for (const f of def.fields) {
       let v = own(supplied, f.key)
         ? supplied[f.key]
         : legacyKeys.includes(f.key) && own(body, f.key)
           ? body[f.key]
-          : (values[f.key] ??
-            (legacyKeys.includes(f.key) ? old[f.key] : undefined));
-      const empty = v == null || v === "";
-      if (
-        !f.archived &&
-        f.required &&
-        empty &&
-        (!old.category_id || switched || own(body, "field_values"))
-      )
-        fail(400, `请填写${f.label}`);
-      if (empty) {
-        values[f.key] = "";
-        continue;
-      }
-      if (f.type === "number") {
+          : (current[f.key] ??
+            (!switched && legacyKeys.includes(f.key) ? old[f.key] : undefined));
+      if (v == null || v === "") v = "";
+      else if (f.type === "number") {
         if (typeof v !== "number" || !Number.isFinite(v))
           fail(400, `${f.label}必须是有效数字`);
       } else if (f.type === "boolean") {
@@ -314,14 +326,30 @@ export function createProjectAssets(db) {
             software_version: 100,
           }[f.key] || (f.type === "textarea" ? 3000 : 1000),
         );
-        if (f.type === "select" && !f.options.includes(v))
+        if (f.type === "select" && v !== "" && !f.options.includes(v))
           fail(400, `${f.label}选项无效`);
       }
+      // Required checks follow normalization so whitespace cannot masquerade
+      // as a value. Zero and false are both valid nonempty values.
+      if (
+        !f.archived &&
+        f.required &&
+        v === "" &&
+        (!old.category_id || switched || own(body, "field_values"))
+      )
+        fail(400, `请填写${f.label}`);
       values[f.key] = v;
+      categoryValues[f.key] = v;
     }
     if (Buffer.byteLength(JSON.stringify(values), "utf8") > 24000)
       fail(400, "自定义内容过大，请减少字段内容");
-    return { category_id: id, field_values: values, type: def.base_type };
+    history[id] = categoryValues;
+    return {
+      category_id: id,
+      field_values: values,
+      category_values: history,
+      type: def.base_type,
+    };
   }
   function hydrateResource(row) {
     const def = categoryRow(
@@ -330,10 +358,33 @@ export function createProjectAssets(db) {
     const values = json(row.field_values_json || "{}");
     for (const k of legacyKeys)
       if (row[k] && !own(values, k)) values[k] = row[k];
+    const history = json(row.category_values_json || "{}");
+    // Once migrated, this map is authoritative. A newly added field must not
+    // accidentally inherit a flat extra belonging to a previous category.
+    if (!own(history, def.id))
+      history[def.id] = Object.fromEntries(
+        def.fields
+          .filter((f) => own(values, f.key))
+          .map((f) => [f.key, values[f.key]]),
+      );
+    for (const f of def.fields) values[f.key] = history[def.id][f.key] ?? "";
+    const fieldHistory = Object.entries(history)
+      .filter(([id]) => id !== def.id)
+      .map(([id, saved]) => {
+        const previous = categoryRow(id);
+        return {
+          category_id: id,
+          category_name: previous.name,
+          fields: previous.fields,
+          values: saved,
+        };
+      });
     return {
       category_id: def.id,
       category: def,
       field_values: values,
+      category_values: history,
+      field_history: fieldHistory,
       ...Object.fromEntries(
         legacyKeys.filter((k) => own(values, k)).map((k) => [k, values[k]]),
       ),
@@ -341,9 +392,10 @@ export function createProjectAssets(db) {
   }
   function saveResource(id, data) {
     run(
-      "UPDATE resources SET category_id=?,field_values_json=? WHERE id=?",
+      "UPDATE resources SET category_id=?,field_values_json=?,category_values_json=? WHERE id=?",
       data.category_id,
       JSON.stringify(data.field_values),
+      JSON.stringify(data.category_values),
       id,
     );
   }
@@ -482,10 +534,15 @@ export function createProjectAssets(db) {
             fail(409, "分类名称已存在");
           if (!collection)
             for (const r of all(
-              "SELECT * FROM resources WHERE category_id=?",
+              "SELECT * FROM resources WHERE category_id=? OR EXISTS(SELECT 1 FROM json_each(resources.category_values_json) WHERE key=?)",
+              id,
               id,
             )) {
-              const values = hydrateResource(r).field_values;
+              const resource = hydrateResource(r);
+              const values =
+                r.category_id === id
+                  ? resource.field_values
+                  : resource.category_values[id] || {};
               for (const f of fields)
                 if (
                   f.type === "select" &&

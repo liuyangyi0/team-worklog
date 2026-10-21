@@ -366,7 +366,7 @@ function ResourceSession({ project, user, members = [] }) {
                 key={resource.id}
                 className={
                   card +
-                  " group p-5 text-left transition hover:border-indigo-200 hover:shadow-md"
+                  " group min-w-0 p-5 text-left transition hover:border-indigo-200 hover:shadow-md"
                 }
               >
                 <div className="flex items-start gap-3">
@@ -405,7 +405,9 @@ function ResourceSession({ project, user, members = [] }) {
                   )}
                 </div>
                 <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-[11px] text-slate-400">
-                  <span>维护人 {resource.owner || "未指定"}</span>
+                  <span className="min-w-0 break-words">
+                    维护人 {resource.owner || "未指定"}
+                  </span>
                   <span>
                     {
                       credentials.filter((c) => c.resource_id === resource.id)
@@ -779,17 +781,33 @@ function ResourceDialog({
       name: "",
       type: "application",
       category_id: "",
-      field_values: {},
       owner: "",
       description: "",
       environment_id: "",
       endpoints: [],
       relations: [],
       ...item,
+      field_values: structuredClone(
+        item?.category_values?.[item.category_id] || item?.field_values || {},
+      ),
     }),
     [error, setError] = useState(null),
     [busy, setBusy] = useState(false),
     [editing, setEditing] = useState(!item);
+  const categoryDrafts = useRef(structuredClone(item?.category_values || {}));
+  function selectCategory(categoryId) {
+    setForm((previous) => {
+      if (previous.category_id)
+        categoryDrafts.current[previous.category_id] = structuredClone(
+          previous.field_values,
+        );
+      return {
+        ...previous,
+        category_id: categoryId,
+        field_values: structuredClone(categoryDrafts.current[categoryId] || {}),
+      };
+    });
+  }
   const categoryOptions = [
     ...categories,
     ...(item?.category && !categories.some((c) => c.id === item.category.id)
@@ -1006,7 +1024,7 @@ function ResourceDialog({
                   autoFocus={!item}
                   className={inputClass}
                   value={form.category_id}
-                  onChange={(e) => update("category_id", e.target.value)}
+                  onChange={(e) => selectCategory(e.target.value)}
                 >
                   <option value="">请选择资源类型</option>
                   {categoryOptions
@@ -1304,7 +1322,8 @@ function CredentialDialog({ item, projectId, resources, onClose, onSaved }) {
     [toast, setToast] = useState("");
   const active = useRef(true),
     timer = useRef(null),
-    revealSequence = useRef(0);
+    revealSequence = useRef(0),
+    formDirty = useRef(false);
   useEffect(
     () => () => {
       active.current = false;
@@ -1319,7 +1338,8 @@ function CredentialDialog({ item, projectId, resources, onClose, onSaved }) {
         .then((r) => {
           if (active.current) {
             setDetail(r.credential || r);
-            setForm((f) => ({ ...f, ...(r.credential || r) }));
+            if (!formDirty.current)
+              setForm((f) => ({ ...f, ...(r.credential || r) }));
             setHistory(r.history || r.credential?.history || []);
           }
         })
@@ -1363,7 +1383,10 @@ function CredentialDialog({ item, projectId, resources, onClose, onSaved }) {
         );
     }
   }
-  const update = (field, value) => setForm((f) => ({ ...f, [field]: value }));
+  const update = (field, value) => {
+    formDirty.current = true;
+    setForm((f) => ({ ...f, [field]: value }));
+  };
   async function save(e) {
     e.preventDefault();
     hide();
@@ -1386,7 +1409,7 @@ function CredentialDialog({ item, projectId, resources, onClose, onSaved }) {
             ? { verified_status: form.verified_status || "unverified" }
             : {}),
           ...(changeSecret ? { secret } : {}),
-          ...(item ? { version: detail.version } : {}),
+          ...(item ? { version: form.version } : {}),
         },
       );
       setSecret("");
@@ -1556,6 +1579,7 @@ function CredentialDialog({ item, projectId, resources, onClose, onSaved }) {
                       className="accent-indigo-500"
                       checked={changeSecret}
                       onChange={(e) => {
+                        formDirty.current = true;
                         setChangeSecret(e.target.checked);
                         setSecret("");
                       }}
@@ -1576,7 +1600,10 @@ function CredentialDialog({ item, projectId, resources, onClose, onSaved }) {
                       className={inputClass + " font-mono"}
                       rows={3}
                       value={secret}
-                      onChange={(e) => setSecret(e.target.value)}
+                      onChange={(e) => {
+                        formDirty.current = true;
+                        setSecret(e.target.value);
+                      }}
                       autoComplete="new-password"
                       spellCheck={false}
                       style={{ WebkitTextSecurity: "disc" }}
@@ -1833,7 +1860,8 @@ function ConfigurationDialog({
     [toast, setToast] = useState("");
   const active = useRef(true),
     sequence = useRef(0),
-    timer = useRef(null);
+    timer = useRef(null),
+    formDirty = useRef(false);
   useEffect(
     () => () => {
       active.current = false;
@@ -1855,7 +1883,7 @@ function ConfigurationDialog({
       const r = await api("/configurations/" + item.id);
       if (active.current) {
         setData(r);
-        setForm((f) => ({ ...f, ...r.configuration }));
+        if (!formDirty.current) setForm((f) => ({ ...f, ...r.configuration }));
       }
     } catch (e) {
       if (active.current) setError(e);
@@ -1869,7 +1897,10 @@ function ConfigurationDialog({
     applications = data?.applications || [];
   const versionNumber = (id) =>
     versions.find((v) => v.id === id)?.number || "—";
-  const update = (field, value) => setForm((f) => ({ ...f, [field]: value }));
+  const update = (field, value) => {
+    formDirty.current = true;
+    setForm((f) => ({ ...f, [field]: value }));
+  };
   async function reveal(versionId, edit = false, copy = false) {
     const token = ++sequence.current;
     setBusy(true);
@@ -1976,7 +2007,7 @@ function ConfigurationDialog({
         let current = config;
         if (metadataOnly) {
           await api("/configurations/" + item.id, "PATCH", {
-            version: current.version,
+            version: form.version ?? current.version,
             name: form.name,
             resource_id: form.resource_id || null,
             environment_id: form.environment_id || null,
@@ -1991,6 +2022,7 @@ function ConfigurationDialog({
           });
         }
         clearContent();
+        formDirty.current = false;
         setEditing(false);
         await load();
         await onChanged();
@@ -2255,7 +2287,7 @@ function ConfigurationDialog({
                   <button
                     type="button"
                     className={primary}
-                    disabled={busy || !config?.latest_version_id}
+                    disabled={busy || !data || !config?.latest_version_id}
                     onClick={() => reveal(config.latest_version_id, true)}
                   >
                     <FileCode2 size={14} />
@@ -2264,6 +2296,7 @@ function ConfigurationDialog({
                   <button
                     type="button"
                     className={secondary}
+                    disabled={busy}
                     onClick={() => {
                       clearContent();
                       setMetadataOnly(true);
@@ -2448,8 +2481,12 @@ function ConfigurationDialog({
                 className={secondary}
                 onClick={() => {
                   clearContent();
-                  if (item) setEditing(false);
-                  else onClose();
+                  if (item) {
+                    formDirty.current = false;
+                    setForm((f) => ({ ...f, ...config }));
+                    setNote("");
+                    setEditing(false);
+                  } else onClose();
                 }}
               >
                 取消

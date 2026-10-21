@@ -944,7 +944,29 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
           const removed = before.project_ids.filter(
             (p) => !data.project_ids.includes(p),
           );
+          for (const incoming of all(
+            "SELECT source.id,source.project_ids FROM resource_relations link JOIN resources source ON source.id=link.resource_id WHERE link.target_id=? AND source.deleted=0",
+            id,
+          )) {
+            if (
+              !parse(incoming.project_ids).some((p) =>
+                data.project_ids.includes(p),
+              )
+            )
+              fail(409, "其它资源仍关联此资源，请先调整资源关系再取消项目关联");
+          }
           for (const p of removed) {
+            if (
+              get(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='documents'",
+              ) &&
+              get(
+                "SELECT id FROM documents WHERE project_id=? AND resource_id=? AND deleted=0 LIMIT 1",
+                p,
+                id,
+              )
+            )
+              fail(409, "该项目仍有资料关联此资源，请先调整资料关联");
             if (
               get(
                 "SELECT id FROM project_deployments WHERE project_id=? AND deleted=0 AND EXISTS(SELECT 1 FROM json_each(json_extract(data_json,'$.resource_ids')) WHERE value=?) LIMIT 1",
@@ -1460,6 +1482,47 @@ export function createResources({ db, dataDir, documents, vaultKey } = {}) {
         const deleting = method === "DELETE";
         if (deleting && value.deleted) fail(409, "记录已删除");
         if (!deleting && !value.deleted) fail(409, "记录尚未删除");
+        if (!deleting) {
+          if (entity === "resources") {
+            const sourceProjects = parse(value.project_ids);
+            for (const relation of all(
+              "SELECT target_id FROM resource_relations WHERE resource_id=?",
+              id,
+            )) {
+              const target = get(
+                "SELECT project_ids FROM resources WHERE id=?",
+                relation.target_id,
+              );
+              if (
+                !target ||
+                !parse(target.project_ids).some((p) =>
+                  sourceProjects.includes(p),
+                )
+              )
+                fail(
+                  409,
+                  "关联资源已取消项目共享，请先重新关联项目，再恢复此资源",
+                );
+            }
+          } else if (value.resource_id) {
+            const target = get(
+              "SELECT project_ids FROM resources WHERE id=?",
+              value.resource_id,
+            );
+            const linkedProjects =
+              entity === "credentials"
+                ? parse(value.project_ids)
+                : [value.project_id];
+            if (
+              !target ||
+              linkedProjects.some((p) => !parse(target.project_ids).includes(p))
+            )
+              fail(
+                409,
+                "关联资源已取消项目共享，请先重新关联项目，再恢复此记录",
+              );
+          }
+        }
         if (
           deleting &&
           value.project_ids &&

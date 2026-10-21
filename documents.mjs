@@ -71,14 +71,15 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
     tags = [...new Set(tags.map((t) => t.trim()))];
     const taskId = b.task_id === undefined ? old?.task_id || null : b.task_id || null;
     const resourceId = b.resource_id === undefined ? old?.resource_id || null : b.resource_id || null;
-    if (taskId && (typeof taskId !== "string" || !get("SELECT id FROM records WHERE id=? AND project_id=? AND deleted=0", taskId, projectId))) fail(400, "关联任务无效或不属于该项目");
+    if (taskId && (typeof taskId !== "string" || !get("SELECT id FROM records WHERE id=? AND project_id=? AND (deleted=0 OR ?)", taskId, projectId, Number(taskId === old?.task_id)))) fail(400, "关联任务无效或不属于该项目");
     if (resourceId) {
       if (typeof resourceId !== "string" || !get("SELECT name FROM sqlite_master WHERE type='table' AND name='resources'")) fail(400, "关联资源无效");
-      const linked = get("SELECT * FROM resources WHERE id=? AND deleted=0", resourceId);
-      if (!linked) fail(400, "关联资源无效");
-      // Shared resources may be linked through resource_projects. The resource module owns that relation.
-      if (linked.project_id && linked.project_id !== projectId) fail(400, "关联资源不属于该项目");
-      if (!linked.project_id && get("SELECT name FROM sqlite_master WHERE type='table' AND name='resource_projects'") && !get("SELECT 1 FROM resource_projects WHERE resource_id=? AND project_id=?", resourceId, projectId)) fail(400, "关联资源不属于该项目");
+      const linked = get("SELECT * FROM resources WHERE id=?", resourceId);
+      if (!linked || (linked.deleted && resourceId !== old?.resource_id)) fail(400, "关联资源无效");
+      // Sharing is stored on the resource itself, not in a resource_projects table.
+      let sharedProjects = [];
+      try { const ids = JSON.parse(linked.project_ids || "[]"); if (Array.isArray(ids)) sharedProjects = ids; } catch {}
+      if (linked.project_id !== projectId && !sharedProjects.includes(projectId)) fail(400, "关联资源不属于该项目");
     }
     const sourcePath = text(b.source_path ?? b.relative_path, "来源路径", 1500, old?.source_path || "");
     if (sourcePath) relativeParts(sourcePath);
@@ -88,8 +89,11 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
   const uploads = createUploads({ db, store, project, document, metadata, event, complete(row, blob, user) {
     project(row.project_id);
     let d = row.document_id ? document(row.document_id) : null;
-    const meta = JSON.parse(row.metadata_json);
-    folder(meta.folder_id, row.project_id);
+    const savedMeta = JSON.parse(row.metadata_json);
+    // Uploads can stay open for hours. Recheck every association before creating
+    // a document, while existing-document uploads only add a content version and
+    // must not revive or validate a stale snapshot of its old metadata.
+    const meta = d ? savedMeta : metadata({ ...savedMeta, project_id: row.project_id });
     const duplicate = get("SELECT d.id document_id,d.title FROM document_versions v JOIN documents d ON d.id=v.document_id WHERE v.sha256=? AND d.project_id=? AND d.deleted=0 AND d.id<>? ORDER BY d.created LIMIT 1", blob.sha256, row.project_id, d?.id || "");
     const deduplicated = Boolean(get("SELECT sha256 FROM document_blobs WHERE sha256=?", blob.sha256));
     run("INSERT OR IGNORE INTO document_blobs(sha256,size,created) VALUES(?,?,?)", blob.sha256, blob.size, now());
@@ -209,7 +213,12 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
       if (!action && method === "GET") return { data: { document: expose(d), versions: all("SELECT * FROM document_versions WHERE document_id=? ORDER BY number DESC", d.id).map(exposeVersion), checkout: get("SELECT * FROM document_checkouts WHERE document_id=? AND expires>?", d.id, now()) || null } };
       if (action !== "release-checkout") checkVersion(d, b);
       if (action === "restore" && method === "POST") {
-        if (!d.deleted) fail(409, "文档未被删除"); folder(d.folder_id, d.project_id);
+        if (!d.deleted) fail(409, "文档未被删除");
+        try { metadata({}, d); }
+        catch (error) {
+          if ([400, 404].includes(error.status)) fail(409, "文档关联已失效，请先恢复资源与本项目的关联及所属目录，再恢复文档");
+          throw error;
+        }
         tx(db, () => { run("UPDATE documents SET deleted=0,version=version+1,updated=? WHERE id=?", now(), d.id); event(user, "restore-document", d.id, d.project_id); });
         return { data: { document: expose(document(d.id)) } };
       }

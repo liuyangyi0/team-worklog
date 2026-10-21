@@ -109,30 +109,77 @@ export function ResourceFields({ category, values, onChange }) {
 }
 
 export function ResourceFieldDetails({ item, categories = [] }) {
-  const values = item.field_values || {},
-    ownFields = item.category?.fields || [];
+  const ownFields = item.category?.fields || [];
+  const currentValues =
+    item.category_values?.[item.category_id] || item.field_values || {};
+  const history = (item.field_history || []).filter(
+    (h) => h.category_id !== item.category_id,
+  );
+  const historicalKeys = new Set(
+    history.flatMap((h) => h.fields.map((f) => f.key)),
+  );
+  const currentKeys = new Set(ownFields.map((f) => f.key));
   const labels = new Map(
     categories.flatMap((c) => c.fields).map((f) => [f.key, f.label]),
   );
   for (const f of ownFields) labels.set(f.key, f.label);
-  const entries = Object.entries(values).filter(
-    ([, v]) => v !== "" && v != null,
+  const populated = (values) =>
+    Object.entries(values || {}).filter(([, v]) => v !== "" && v != null);
+  const entries = populated(currentValues).filter(([key]) =>
+    currentKeys.has(key),
   );
-  if (!entries.length) return null;
-  return (
-    <div className="grid gap-3 sm:grid-cols-2" aria-label="资源专属信息">
-      {entries.map(([key, value]) => (
-        <div className="rounded-xl bg-slate-50 p-3" key={key}>
-          <p className="text-xs text-slate-400">
-            {labels.get(key) || "历史字段"}
-            {!ownFields.some((f) => f.key === key && !f.archived)
-              ? " · 历史保留"
-              : ""}
+  // Earlier releases flattened historical values without a category identifier.
+  // Keep these orphaned values visible instead of dropping them after migration.
+  const legacyEntries = populated(item.field_values).filter(
+    ([key]) => !currentKeys.has(key) && !historicalKeys.has(key),
+  );
+  const historical = history.filter((h) => populated(h.values).length);
+  if (!entries.length && !historical.length && !legacyEntries.length)
+    return null;
+  function fields(values, definitions, legacy = false) {
+    const byKey = new Map(definitions.map((f) => [f.key, f]));
+    return populated(values).map(([key, value]) => {
+      const field = byKey.get(key);
+      return (
+        <div className="min-w-0 rounded-xl bg-slate-50 p-3" key={key}>
+          <p className="break-words text-xs text-slate-400">
+            {field?.label || labels.get(key) || "历史字段"}
+            {legacy || !field || field.archived ? " · 历史保留" : ""}
           </p>
           <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">
             {typeof value === "boolean" ? (value ? "是" : "否") : String(value)}
           </p>
         </div>
+      );
+    });
+  }
+  return (
+    <div className="space-y-4" aria-label="资源专属信息">
+      {!!entries.length && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {fields(Object.fromEntries(entries), ownFields)}
+        </div>
+      )}
+      {!!legacyEntries.length && (
+        <section aria-label="历史资料">
+          <p className="mb-2 text-xs font-medium text-slate-500">历史资料</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {fields(Object.fromEntries(legacyEntries), [], true)}
+          </div>
+        </section>
+      )}
+      {historical.map((h) => (
+        <section
+          key={h.category_id}
+          aria-label={"历史分类 · " + h.category_name}
+        >
+          <p className="mb-2 break-words text-xs font-medium text-slate-500">
+            历史分类 · {h.category_name}
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {fields(h.values, h.fields, true)}
+          </div>
+        </section>
       ))}
     </div>
   );

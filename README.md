@@ -2,7 +2,7 @@
 
 一个轻量的团队工作记录与项目协作工具，记录“原定谁负责、实际谁完成”，支持公开浏览、多人维护和不可删除的操作日志。
 
-当前版本：**1.8.0**。前端采用 React、Vite、Tailwind CSS 和 lucide-react；后端使用 Node.js 24 自带的 HTTP 与 SQLite，无需单独部署数据库。
+当前版本：**1.8.1**。前端采用 React、Vite、Tailwind CSS 和 lucide-react；后端使用 Node.js 24 自带的 HTTP 与 SQLite，无需单独部署数据库。
 
 ## 功能
 
@@ -79,7 +79,7 @@ npm test
 npm run build
 ~~~
 
-另有六组浏览器回归，覆盖记录编辑、子任务/评论、待办/提醒、任务依赖，以及文件上传/交接/账号/配置与手机布局，均使用临时数据库，不连接生产服务。准备 Playwright 和 Chromium 后运行：
+另有七组浏览器回归，覆盖记录编辑、子任务/评论、待办/提醒、任务依赖，以及文件上传/交接/账号/配置与手机布局，均使用临时数据库，不连接生产服务。准备 Playwright 和 Chromium 后运行：
 
 ~~~sh
 npm install --no-save --package-lock=false playwright
@@ -96,3 +96,7 @@ npm run test:browser
 - [界面设计说明](设计说明.md)
 
 仓库包含源码、测试和部署示例；不包含真实成员名单、数据库、登录凭据、生产部署信息或本地备份。
+
+## v1.8.1 修复
+
+独立分类字段历史、必填空白校验、共享资源资料关联和回收站恢复一致性、上传完成时重检关联、慢响应不覆盖编辑草稿、手机长字段换行，以及登录/改密的并发一致性。新增对抗回归纳入 npm test 和 npm run test:browser。
