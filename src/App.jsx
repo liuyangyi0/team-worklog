@@ -255,16 +255,35 @@ export default function App() {
       return next;
     });
   }
+  function openBatch(type) {
+    setModal({
+      type,
+      records: selectedRecords.map((record) => ({ ...record })),
+    });
+  }
   async function batch(action, changes) {
+    const snapshot = modal?.records || selectedRecords;
     try {
       return await api("/records/batch", "POST", {
         action,
-        items: selectedRecords.map((r) => ({ id: r.id, version: r.version })),
+        items: snapshot.map((r) => ({ id: r.id, version: r.version })),
         ...(changes ? { changes } : {}),
       });
     } catch (e) {
       if (e.status !== 409) throw e;
-      await refresh(true).catch(() => {});
+      const next = await refresh(true).catch(() => null);
+      if (next)
+        setModal((current) =>
+          current && current.type === modal?.type && current.records
+            ? {
+                ...current,
+                records: current.records.map(
+                  (record) =>
+                    next.records.find((r) => r.id === record.id) || record,
+                ),
+              }
+            : current,
+        );
       throw Object.assign(
         new Error("部分记录刚被他人修改或删除，列表已刷新，请确认后重新提交"),
         { status: 409 },
@@ -747,7 +766,7 @@ export default function App() {
                             </span>
                             <button
                               className={secondary + " px-3 py-1.5 text-xs"}
-                              onClick={() => setModal({ type: "batch" })}
+                              onClick={() => openBatch("batch")}
                             >
                               <ListChecks className="h-3.5 w-3.5" />
                               批量修改
@@ -757,7 +776,7 @@ export default function App() {
                                 secondary +
                                 " px-3 py-1.5 text-xs hover:text-rose-500"
                               }
-                              onClick={() => setModal({ type: "batch-delete" })}
+                              onClick={() => openBatch("batch-delete")}
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                               批量删除
@@ -778,11 +797,11 @@ export default function App() {
                           allRecords={projectRecords}
                           forceExpand={Boolean(
                             keyword ||
-                            month ||
-                            peopleFilter.length ||
-                            priorityFilter ||
-                            dueFilter ||
-                            blockedFilter,
+                              month ||
+                              peopleFilter.length ||
+                              priorityFilter ||
+                              dueFilter ||
+                              blockedFilter,
                           )}
                           onOpen={(r) => setDetailId(r.id)}
                           onAddChild={addChild}
@@ -1159,7 +1178,7 @@ export default function App() {
       )}
       {modal?.type === "batch" && project && (
         <BatchDialog
-          count={selectedRecords.length}
+          count={modal.records.length}
           people={people}
           onClose={() => setModal(null)}
           onSave={async (changes) => {
@@ -1171,7 +1190,7 @@ export default function App() {
       )}
       {modal?.type === "batch-delete" && project && (
         <BatchDeleteDialog
-          records={selectedRecords}
+          records={modal.records}
           onClose={() => setModal(null)}
           onDelete={async () => {
             const result = await batch("delete");

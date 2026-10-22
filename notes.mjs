@@ -59,6 +59,7 @@ export function createNotes({ db }) {
       typeof occurred !== "string" ||
       (occurred &&
         (!/^\d{4}-\d{2}-\d{2}$/.test(occurred) ||
+          !Number.isFinite(Date.parse(occurred + "T00:00:00Z")) ||
           new Date(occurred + "T00:00:00Z").toISOString().slice(0, 10) !==
             occurred))
     )
@@ -120,7 +121,7 @@ export function createNotes({ db }) {
     };
   }
   const order =
-    "ORDER BY CASE WHEN occurred_on='' THEN substr(created,1,10) ELSE occurred_on END DESC,created DESC";
+    "ORDER BY CASE WHEN occurred_on='' THEN date(created,'+8 hours') ELSE occurred_on END DESC,created DESC";
   async function api({ route, method, params, b = {}, user }) {
     route = route.replace(/^\/api(?=\/)/, "");
     const list = route.match(/^\/projects\/([\w-]+)\/notes$/);

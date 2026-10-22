@@ -141,6 +141,7 @@ export function NoteDialog({
   }, [project.id]);
   const tasks = records.filter((r) => r.project_id === project.id);
   function addFiles(list) {
+    if (busy) return;
     // Copy now: the input's live FileList is cleared right after this call.
     const files = [...list];
     setPending((old) => [
@@ -233,6 +234,8 @@ export function NoteDialog({
     }
   }
   async function detach(file) {
+    if (busy) return;
+    setBusy(true);
     setError("");
     try {
       const next = (
@@ -246,6 +249,8 @@ export function NoteDialog({
       await onSaved(next, { keepOpen: true });
     } catch (e) {
       setError(e);
+    } finally {
+      setBusy(false);
     }
   }
   return (
@@ -256,7 +261,7 @@ export function NoteDialog({
       onClose={() => !busy && onClose()}
     >
       <form onSubmit={submit}>
-        <div className="space-y-5 px-6 pb-2">
+        <fieldset disabled={busy} className="min-w-0 space-y-5 px-6 pb-2">
           <fieldset>
             <legend className="mb-2 text-[13px] font-medium text-slate-600">
               类型
@@ -408,7 +413,7 @@ export function NoteDialog({
               ”目录，可在资料库中查找。
             </p>
           </fieldset>
-        </div>
+        </fieldset>
         {progress && (
           <p role="status" className="mx-6 text-xs text-indigo-500">
             正在上传{progress}

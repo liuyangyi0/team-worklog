@@ -94,13 +94,17 @@ const eventKeys = new Set([
   "type",
   "application_id",
 ]);
-function cleanDetails(details) {
+function cleanDetails(details, entityType) {
   const result = {};
   if (!details || typeof details !== "object" || Array.isArray(details))
     return result;
   for (const [key, value] of Object.entries(details)) {
     if (!eventKeys.has(key)) continue;
-    if (typeof value === "string") result[key] = value.slice(0, 1000);
+    if (typeof value === "string")
+      result[key] = value.slice(
+        0,
+        entityType === "note" && ["from", "to"].includes(key) ? 4000 : 1000,
+      );
     else if (value === null || typeof value === "boolean") result[key] = value;
     else if (typeof value === "number" && Number.isFinite(value))
       result[key] = value;
@@ -134,7 +138,7 @@ export function resourceEvent(
       action,
       entityType,
       entityId,
-      JSON.stringify(cleanDetails(details)),
+      JSON.stringify(cleanDetails(details, entityType)),
       new Date().toISOString(),
     ).lastInsertRowid;
 }

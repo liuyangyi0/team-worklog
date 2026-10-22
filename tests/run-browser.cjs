@@ -38,6 +38,7 @@ const targets = process.argv.slice(2).length
       "review-ui.browser.cjs",
       "batch.browser.cjs",
       "handover.browser.cjs",
+      "release-review.browser.cjs",
     ];
 let executable = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
 if (!executable && process.platform === "win32") {
