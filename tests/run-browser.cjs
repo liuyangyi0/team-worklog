@@ -52,6 +52,7 @@ const targets = process.argv.slice(2).length
       "archives-integration.browser.cjs",
       "file-exchange.browser.cjs",
       "file-exchange-integration.browser.cjs",
+      "note-create-files.browser.cjs",
     ];
 let executable = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
 if (!executable && process.platform === "win32") {

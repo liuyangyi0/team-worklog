@@ -16,6 +16,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE_PATH||'playwright');
   await api('/records','POST',{project_id:closed.id,task:'已归档项目里的待办',owner:'胡示例三'},alice.cookie);
   browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EXECUTABLE_PATH?{executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH}:{})});
   const context=await browser.newContext({viewport:{width:1280,height:900},acceptDownloads:true});p=await context.newPage();const errors=[];p.on('pageerror',e=>errors.push(e.message));
+  const ready=await fetch(origin+'/worklog/',{signal:AbortSignal.timeout(5000)});assert.equal(ready.status,200);assert.ok((await ready.text()).includes('/worklog/assets/'));
   await p.goto(origin+'/worklog/');await p.getByText('整理接口文档',{exact:true}).waitFor();
   assert.equal(await p.getByLabel('选择：整理接口文档',{exact:true}).count(),0,'guests cannot select rows');
   await p.getByRole('button',{name:'登录 / 注册',exact:false}).click();await p.getByLabel('账号',{exact:true}).fill('batch_alice');await p.getByLabel('密码',{exact:true}).fill('Temporary-test-123');await p.locator('form').getByRole('button',{name:'登录',exact:true}).click();

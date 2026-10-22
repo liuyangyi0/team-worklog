@@ -348,6 +348,9 @@ export function NoteComposer({
     [deliverables, setDeliverables] = useState([]),
     [documents, setDocuments] = useState(null),
     [documentId, setDocumentId] = useState(""),
+    [documentVersions, setDocumentVersions] = useState([]),
+    [documentVersionId, setDocumentVersionId] = useState(""),
+    [existingFiles, setExistingFiles] = useState([]),
     [versionFile, setVersionFile] = useState(null),
     [denied, setDenied] = useState(false),
     [pending, setPending] = useState([]),
@@ -374,6 +377,10 @@ export function NoteComposer({
     setDeliverableId("");
     setTaskId("");
     setDocuments(null);
+    setDocumentId("");
+    setDocumentVersions([]);
+    setDocumentVersionId("");
+    setExistingFiles([]);
     setVersionFile(null);
     setNote(null);
     setError("");
@@ -433,7 +440,14 @@ export function NoteComposer({
     setError("");
     let saved = note;
     try {
+      const selected = selectedExisting();
+      const attachments = [
+        ...existingFiles,
+        ...(selected ? [selected] : []),
+      ].map(({ document_id, version_id }) => ({ document_id, version_id }));
+      if (attachments.length > 100) throw new Error("一次最多关联 100 份资料");
       const fields = {
+        attachments,
         kind,
         body,
         occurred_on: occurred || "",
@@ -458,6 +472,10 @@ export function NoteComposer({
       ).note;
       if (!live.current) return;
       setNote(saved);
+      setExistingFiles([]);
+      setDocumentId("");
+      setDocumentVersions([]);
+      setDocumentVersionId("");
       const failed = [];
       if (pending.length) {
         const folder = await ensureFolder(project.id, ATTACHMENT_FOLDER);
@@ -573,29 +591,78 @@ export function NoteComposer({
       if (live.current) setBusy(false);
     }
   }
-  async function attachExisting() {
-    if (saving.current || !note || !documentId) return;
-    const doc = documents?.find((d) => d.id === documentId);
-    if (!doc?.current_version_id) return;
+  async function chooseDocument(id) {
+    if (saving.current) return;
+    setDocumentId(id);
+    setDocumentVersions([]);
+    setDocumentVersionId("");
+    setError("");
+    if (!id) return;
     saving.current = true;
     setBusy(true);
-    setError("");
     try {
-      const next = (
-        await api("/notes/" + note.id + "/files", "POST", {
-          document_id: doc.id,
-          version_id: doc.current_version_id,
-        })
-      ).note;
+      const result = await api("/documents/" + id);
       if (!live.current) return;
-      setNote((current) => ({ ...current, files: next.files }));
-      setDocumentId("");
-      await publishSaved(next, { keepOpen: true });
+      const d = result.document;
+      if (d?.project_id !== project.id || d.deleted || d.sensitive)
+        throw new Error("请选择当前项目的有效非敏感资料");
+      const versions = (result.versions || []).filter(
+        (v) =>
+          !v.conflict ||
+          v.id === d.current_version_id ||
+          v.id === d.published_version_id,
+      );
+      setDocuments((old) =>
+        (old || []).map((doc) => (doc.id === id ? d : doc)),
+      );
+      setDocumentVersions(versions);
+      setDocumentVersionId(
+        versions.some((v) => v.id === d.current_version_id)
+          ? d.current_version_id
+          : "",
+      );
+      if (!versions.length)
+        throw new Error("该资料暂无可关联版本，请选择其他资料");
     } catch (e) {
       if (live.current && !unauthorized(e)) setError(e);
     } finally {
       saving.current = false;
       if (live.current) setBusy(false);
+    }
+  }
+  function selectedExisting() {
+    if (!documentId) return null;
+    const doc = documents?.find((d) => d.id === documentId);
+    const version = documentVersions.find((v) => v.id === documentVersionId);
+    if (!doc || !version)
+      throw new Error("请为所选资料选择具体文件版本，或清除这份选择");
+    if (
+      existingFiles.some((f) => f.document_id === documentId) ||
+      note?.files?.some((f) => f.document_id === documentId)
+    )
+      throw new Error("该资料已选择或已关联，请勿重复添加");
+    return {
+      document_id: doc.id,
+      version_id: version.id,
+      title: doc.title,
+      filename: version.filename,
+      number: version.number,
+    };
+  }
+  function queueExisting() {
+    if (saving.current) return;
+    try {
+      const choice = selectedExisting();
+      if (!choice) return;
+      if (existingFiles.length >= 99)
+        throw new Error("一次最多关联 100 份资料");
+      setExistingFiles((old) => [...old, choice]);
+      setDocumentId("");
+      setDocumentVersions([]);
+      setDocumentVersionId("");
+      setError("");
+    } catch (e) {
+      setError(e);
     }
   }
   if (denied) return null;
@@ -795,48 +862,106 @@ export function NoteComposer({
                 onUnauthorized={() => unauthorized({ status: 401 })}
               />
             )}
-            {note && (
-              <div className="mt-3 space-y-2">
-                {documents === null ? (
-                  <button
-                    type="button"
-                    className="text-xs text-indigo-500 hover:underline"
-                    onClick={loadDocuments}
-                  >
-                    关联已有资料
-                  </button>
-                ) : (
-                  <div className="flex min-w-0 flex-wrap gap-2">
+            <div className="mt-3 space-y-2">
+              {existingFiles.length > 0 && (
+                <ul aria-label="待关联资料" className="space-y-1.5">
+                  {existingFiles.map((f) => (
+                    <li
+                      key={f.document_id}
+                      className="flex min-w-0 items-center justify-between gap-2 rounded-xl bg-indigo-50/60 px-3 py-2 text-xs text-slate-600"
+                    >
+                      <span className="min-w-0 break-words">
+                        {f.title} · V{f.number} · {f.filename}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={"取消关联选择：" + f.title}
+                        className="shrink-0 text-slate-400 hover:text-rose-500"
+                        onClick={() =>
+                          setExistingFiles((old) =>
+                            old.filter(
+                              (file) => file.document_id !== f.document_id,
+                            ),
+                          )
+                        }
+                      >
+                        <X size={14} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {documents === null ? (
+                <button
+                  type="button"
+                  className="text-xs text-indigo-500 hover:underline"
+                  onClick={loadDocuments}
+                >
+                  关联已有资料
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
                     <select
                       aria-label="选择已有资料"
                       value={documentId}
-                      onChange={(e) => setDocumentId(e.target.value)}
-                      className={inputClass + " min-w-0 flex-1"}
+                      onChange={(e) => chooseDocument(e.target.value)}
+                      className={inputClass + " min-w-0"}
                     >
-                      <option value="">选择已有资料</option>
+                      <option value="">选择已有资料（可不选）</option>
                       {documents
-                        .filter((d) => !d.deleted && d.current_version_id)
+                        .filter(
+                          (d) =>
+                            !d.deleted &&
+                            !d.sensitive &&
+                            d.current_version_id &&
+                            !existingFiles.some(
+                              (f) => f.document_id === d.id,
+                            ) &&
+                            !note?.files?.some((f) => f.document_id === d.id),
+                        )
                         .map((d) => (
                           <option key={d.id} value={d.id}>
                             {d.title}
                           </option>
                         ))}
                     </select>
-                    <button
-                      type="button"
-                      className={secondary}
-                      disabled={!documentId}
-                      onClick={attachExisting}
+                    <select
+                      aria-label="选择资料版本"
+                      value={documentVersionId}
+                      onChange={(e) => setDocumentVersionId(e.target.value)}
+                      disabled={!documentId || !documentVersions.length}
+                      className={inputClass + " min-w-0"}
                     >
-                      固定并关联
-                    </button>
+                      <option value="">请选择具体版本</option>
+                      {documentVersions.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {"V" +
+                            v.number +
+                            " · " +
+                            v.filename +
+                            (documents.find((d) => d.id === documentId)
+                              ?.current_version_id === v.id
+                              ? " · 当前工作版"
+                              : "")}
+                        </option>
+                      ))}
+                    </select>
                   </div>
-                )}
-                <p className="text-xs text-slate-400">
-                  关联时固定所选资料的版本。新记录请先保存内容，再关联已有资料。
-                </p>
-              </div>
-            )}
+                  <button
+                    type="button"
+                    className="text-xs text-indigo-500 hover:underline disabled:text-slate-300"
+                    disabled={!documentId || !documentVersionId}
+                    onClick={queueExisting}
+                  >
+                    再选一份资料
+                  </button>
+                </div>
+              )}
+              <p className="text-xs leading-relaxed text-slate-400">
+                选择文件和版本后直接点保存，与正文一起关联；可用“再选一份资料”添加多份。取消不建立新关联。
+              </p>
+            </div>
             <label
               onDragOver={(e) => {
                 e.preventDefault();
@@ -917,7 +1042,9 @@ export function NoteComposer({
           </button>
           <button
             type="submit"
-            disabled={busy || !body.trim()}
+            disabled={
+              busy || !body.trim() || (!!documentId && !documentVersionId)
+            }
             className={primary}
           >
             {busy ? "保存中…" : "保存"}

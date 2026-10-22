@@ -244,6 +244,55 @@ export function createNotes({ db }) {
       fail(409, "请先采用待合并版本，再关联到随手记");
     return v;
   };
+  function attachmentChoices(value) {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.length > 100)
+      fail(400, "关联资料列表无效，一次最多选择 100 份资料");
+    const seen = new Set();
+    return value.map((choice) => {
+      if (
+        !choice ||
+        typeof choice !== "object" ||
+        Array.isArray(choice) ||
+        typeof choice.document_id !== "string" ||
+        typeof choice.version_id !== "string"
+      )
+        fail(400, "请为每份关联资料选择具体文件版本");
+      if (seen.has(choice.document_id)) fail(400, "同一份资料只能选择一个版本");
+      seen.add(choice.document_id);
+      return { document_id: choice.document_id, version_id: choice.version_id };
+    });
+  }
+  // Called inside the note transaction: every chosen version and audit must succeed.
+  function attachChoices(user, n, choices) {
+    const prepared = choices.map((choice) => {
+      const d = attachmentDocument(choice.document_id, n.project_id);
+      const v = attachmentVersion(d, choice.version_id);
+      const old = link(n.id, d.id);
+      if (old && old.version_id !== v.id)
+        fail(409, "该资料已关联其他版本，请刷新核对后使用更正版本");
+      return { d, v, old };
+    });
+    for (const { d, v, old } of prepared) {
+      if (old) continue;
+      run(
+        "INSERT INTO project_note_files(note_id,document_id,created,version_id,link_version) VALUES(?,?,?,?,?)",
+        n.id,
+        d.id,
+        now(),
+        v.id,
+        randomUUID(),
+      );
+      run("UPDATE project_notes SET updated=? WHERE id=?", now(), n.id);
+      event(user, "attach-note", n, {
+        document_id: d.id,
+        version_id: v.id,
+        filename: v.filename,
+        before: null,
+        after: file(n.id, d.id),
+      });
+    }
+  }
   function present(n) {
     const root = rootId(n);
     const counts = get(
@@ -331,6 +380,7 @@ export function createNotes({ db }) {
     if (list && method === "POST") {
       const projectId = project(list[1]);
       const f = fields(b, projectId);
+      const choices = attachmentChoices(b.attachments);
       let parentId = b.parent_note_id === undefined ? null : b.parent_note_id;
       if (parentId !== null) {
         const parent =
@@ -375,6 +425,7 @@ export function createNotes({ db }) {
           before: null,
           after: snapshot(saved),
         });
+        attachChoices(user, saved, choices);
       });
       return { status: 201, data: { note: present(note(id)) } };
     }
@@ -406,6 +457,7 @@ export function createNotes({ db }) {
       )
         fail(400, "记录创建后不能更改所属事项");
       const f = fields(b, n.project_id, n);
+      const choices = attachmentChoices(b.attachments);
       tx(db, () => {
         run(
           "UPDATE project_notes SET kind=?,body=?,occurred_on=?,people=?,deliverable_id=?,task_id=?,file_direction=?,counterparty=?,exchange_time=?,channel=?,version=version+1,updated=? WHERE id=?",
@@ -433,6 +485,7 @@ export function createNotes({ db }) {
             after: snapshot(note(n.id)),
           },
         );
+        attachChoices(user, note(n.id), choices);
       });
       return { data: { note: present(note(n.id)) } };
     }
