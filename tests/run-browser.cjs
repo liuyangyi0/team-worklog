@@ -50,6 +50,8 @@ const targets = process.argv.slice(2).length
       "record-archives.browser.cjs",
       "project-archive.browser.cjs",
       "archives-integration.browser.cjs",
+      "file-exchange.browser.cjs",
+      "file-exchange-integration.browser.cjs",
     ];
 let executable = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
 if (!executable && process.platform === "win32") {

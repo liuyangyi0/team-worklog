@@ -11,10 +11,19 @@ export const NOTE_KINDS = [
   },
   {
     id: "file",
-    label: "文件转存",
-    hint: "群里或邮件收到的文件，说明这是什么、谁发的",
+    label: "文件收发",
+    hint: "记录收到或发出的文件、往来方与收发时间，附件可选",
   },
   { id: "other", label: "其他", hint: "其他需要留档的信息" },
 ];
 export const noteKind = (id) =>
   NOTE_KINDS.find((kind) => kind.id === id) || NOTE_KINDS[3];
+
+export const FILE_DIRECTIONS = [
+  { id: "received", label: "收到" },
+  { id: "sent", label: "发出" },
+];
+export const fileDirection = (id) =>
+  FILE_DIRECTIONS.find((direction) => direction.id === id) || null;
+export const fileDirectionLabel = (id) =>
+  fileDirection(id)?.label || "未区分收发";

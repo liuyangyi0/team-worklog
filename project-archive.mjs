@@ -42,7 +42,37 @@ export function createProjectArchive({ db }) {
         .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
         .get(name),
     );
-  const sources = (mode) => {
+  const noteMetadata = () => {
+    const exists = has("project_notes");
+    const columns = exists
+      ? new Set(
+          db
+            .prepare("PRAGMA table_info(project_notes)")
+            .all()
+            .map((column) => column.name),
+        )
+      : new Set();
+    const value = (key) =>
+      columns.has(key) ? "COALESCE(n." + key + ",'')" : "''";
+    const onlyFile = (expression) =>
+      exists
+        ? "CASE WHEN n.kind='file' THEN " + expression + " ELSE '' END"
+        : "''";
+    return {
+      note_kind: exists ? "COALESCE(n.kind,'')" : "''",
+      file_direction: onlyFile(
+        "CASE WHEN " +
+          value("file_direction") +
+          " IN ('received','sent') THEN " +
+          value("file_direction") +
+          " ELSE '' END",
+      ),
+      counterparty: onlyFile("substr(" + value("counterparty") + ",1,200)"),
+      exchange_time: onlyFile("substr(" + value("exchange_time") + ",1,5)"),
+      channel: onlyFile("substr(" + value("channel") + ",1,100)"),
+    };
+  };
+  const sources = (mode, exchange) => {
     const sql = [];
     if (has("project_notes")) {
       let attachments = "''";
@@ -66,7 +96,13 @@ export function createProjectArchive({ db }) {
           ",d.current_version_id) WHERE f.note_id=n.id ORDER BY d.title,d.id)),'')";
       }
       sql.push(
-        "SELECT 'note:'||n.id id,'note' source_type,n.project_id,substr(n.body,1,80) title,n.body||CASE WHEN n.people<>'' THEN ' · 相关人员：'||n.people ELSE '' END||CASE WHEN n.archive_attachments<>'' THEN ' · '||n.archive_attachments ELSE '' END summary,n.occurred_on,n.created recorded_at,n.id entity_id,NULL version_id,NULL version_number,'' version_name,'note-recorded' event_type,n.body||' '||n.people||' '||n.author_name||' '||n.archive_attachments search_text,'' path_text FROM (SELECT n.*, " +
+        "SELECT 'note:'||n.id id,'note' source_type,n.project_id,substr(n.body,1,80) title,n.body||CASE WHEN n.people<>'' THEN ' · 相关人员：'||n.people ELSE '' END||CASE WHEN n.archive_attachments<>'' THEN ' · '||n.archive_attachments ELSE '' END summary,n.occurred_on,n.created recorded_at,n.id entity_id,NULL version_id,NULL version_number,'' version_name,'note-recorded' event_type,n.body||' '||n.people||' '||n.author_name||' '||n.archive_attachments||' '||(" +
+          exchange.counterparty +
+          ")||' '||(" +
+          exchange.channel +
+          ")||' '||(" +
+          exchange.exchange_time +
+          ") search_text,'' path_text FROM (SELECT n.*, " +
           attachments +
           " archive_attachments FROM project_notes n) n WHERE n.deleted=0",
       );
@@ -141,12 +177,14 @@ export function createProjectArchive({ db }) {
       "to",
       "page",
       "limit",
+      "file_direction",
     ])
       if (params.getAll(key).length > 1) fail(400, "查询参数不能重复");
     const mode = params.get("mode") || "timeline",
       projectId = params.get("project_id") || "",
       q = (params.get("q") || "").trim(),
       kind = params.get("kind") || "",
+      fileDirection = params.get("file_direction") || "",
       from = params.get("from") || "",
       to = params.get("to") || "";
     if (!["timeline", "search"].includes(mode)) fail(400, "查询模式无效");
@@ -159,6 +197,13 @@ export function createProjectArchive({ db }) {
     if (q.length > 200 || /[\x00-\x1f]/.test(q))
       fail(400, "关键词最多 200 字，不能包含控制字符");
     if (kind && !KINDS.includes(kind)) fail(400, "来源类型无效");
+    if (
+      fileDirection &&
+      !["received", "sent", "unclassified"].includes(fileDirection)
+    )
+      fail(400, "文件收发筛选无效");
+    if (fileDirection && kind && kind !== "note")
+      fail(400, "文件收发筛选仅适用于随手记来源");
     if (
       (from && !validDay(from)) ||
       (to && !validDay(to)) ||
@@ -177,6 +222,12 @@ export function createProjectArchive({ db }) {
       filters.push("a.source_type=?");
       values.push(kind);
     }
+    if (fileDirection) {
+      filters.push(
+        "a.source_type='note' AND a.note_kind='file' AND a.file_direction=?",
+      );
+      values.push(fileDirection === "unclassified" ? "" : fileDirection);
+    }
     if (q) {
       filters.push(
         "(instr(lower(a.search_text),lower(?))>0 OR instr(lower(a.path_text),lower(?))>0)",
@@ -191,10 +242,21 @@ export function createProjectArchive({ db }) {
       filters.push("a.sort_day<=?");
       values.push(to);
     }
+    const exchange = noteMetadata();
+    const exchangeProjection = Object.entries(exchange)
+      .map(([key, value]) => value + " " + key)
+      .join(",");
+    const noteJoin = has("project_notes")
+      ? " LEFT JOIN project_notes n ON entries.source_type='note' AND n.id=entries.entity_id AND n.project_id=entries.project_id"
+      : "";
     const cte =
       "WITH entries(id,source_type,project_id,title,summary,occurred_on,recorded_at,entity_id,version_id,version_number,version_name,event_type,search_text,path_text) AS (" +
-      sources(mode) +
-      "), archive AS (SELECT entries.*,CASE WHEN occurred_on<>'' THEN occurred_on ELSE COALESCE(date(recorded_at,'+8 hours'),'') END sort_day FROM entries), filtered AS (SELECT a.*,p.name project_name FROM archive a JOIN projects p ON p.id=a.project_id" +
+      sources(mode, exchange) +
+      "), archive AS (SELECT entries.*," +
+      exchangeProjection +
+      ",CASE WHEN entries.occurred_on<>'' THEN entries.occurred_on ELSE COALESCE(date(entries.recorded_at,'+8 hours'),'') END sort_day FROM entries" +
+      noteJoin +
+      "), filtered AS (SELECT a.*,p.name project_name FROM archive a JOIN projects p ON p.id=a.project_id" +
       (filters.length ? " WHERE " + filters.join(" AND ") : "") +
       ") ";
     const total = db
@@ -203,7 +265,7 @@ export function createProjectArchive({ db }) {
     const rows = db
       .prepare(
         cte +
-          "SELECT id,source_type,project_id,project_name,title,summary,occurred_on,recorded_at,entity_id,version_id,version_number,version_name,event_type,search_text context_text,CASE WHEN ?<>'' AND instr(lower(path_text),lower(?))>0 THEN 1 ELSE 0 END path_match FROM filtered ORDER BY sort_day DESC,recorded_at DESC,id ASC LIMIT ? OFFSET ?",
+          "SELECT id,source_type,project_id,project_name,title,summary,occurred_on,recorded_at,entity_id,version_id,version_number,version_name,event_type,note_kind,file_direction,counterparty,exchange_time,channel,search_text context_text,CASE WHEN ?<>'' AND instr(lower(path_text),lower(?))>0 THEN 1 ELSE 0 END path_match FROM filtered ORDER BY sort_day DESC,recorded_at DESC,id ASC LIMIT ? OFFSET ?",
       )
       .all(...values, q, q, limit, (page - 1) * limit);
     return {

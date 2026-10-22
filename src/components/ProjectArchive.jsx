@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import { displayTime } from "../library-api.js";
 import { InternalLogin } from "./ProjectLibrary.jsx";
 import { inputClass, primary, secondary } from "./UI.jsx";
+import NoteExchange from "./NoteExchange.jsx";
 
 const names = {
   note: "随手记",
@@ -19,6 +20,7 @@ const initial = (project, mode) => ({
   project_id: project?.id || "",
   q: "",
   kind: "",
+  file_direction: "",
   from: "",
   to: "",
   page: 1,
@@ -111,7 +113,12 @@ function ArchiveSession({
     setQuery(next);
   }
   function field(key, value) {
-    setDraft((old) => ({ ...old, [key]: value }));
+    setDraft((old) => ({
+      ...old,
+      [key]: value,
+      ...(key === "file_direction" && value ? { kind: "note" } : {}),
+      ...(key === "kind" && value !== "note" ? { file_direction: "" } : {}),
+    }));
   }
   if (expired)
     return (
@@ -167,7 +174,7 @@ function ArchiveSession({
         className={box + " mt-4 p-4"}
         aria-label="档案查询条件"
       >
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <label className="text-xs text-slate-500">
             项目范围
             <select
@@ -201,6 +208,20 @@ function ArchiveSession({
             </select>
           </label>
           <label className="text-xs text-slate-500">
+            文件收发
+            <select
+              aria-label="文件收发"
+              className={inputClass + " mt-1.5"}
+              value={draft.file_direction}
+              onChange={(e) => field("file_direction", e.target.value)}
+            >
+              <option value="">全部收发</option>
+              <option value="received">收到文件</option>
+              <option value="sent">发出文件</option>
+              <option value="unclassified">未区分收发</option>
+            </select>
+          </label>
+          <label className="text-xs text-slate-500">
             起始日期
             <input
               type="date"
@@ -226,7 +247,7 @@ function ArchiveSession({
             aria-label="查档关键词"
             maxLength={200}
             className={inputClass + " min-w-0 flex-1 basis-56"}
-            placeholder="标题、人员、记录正文、标签或历史文件名"
+            placeholder="标题、人员、往来方、渠道、正文、标签或历史文件名"
             value={draft.q}
             onChange={(e) => field("q", e.target.value)}
           />
@@ -235,6 +256,11 @@ function ArchiveSession({
             查询档案
           </button>
         </div>
+        {draft.file_direction && (
+          <p className="mt-3 text-xs leading-5 text-indigo-500">
+            文件收发筛选仅包含文件类随手记；切换其他来源将清除此筛选。
+          </p>
+        )}
         <p className="mt-3 text-xs leading-5 text-slate-400">
           仅检索资料元数据和记录正文；不解析文件正文，不做
           OCR。日期范围按发生日筛选；发生日未填的记录按系统登记日（北京时间）筛选。
@@ -309,6 +335,10 @@ function ArchiveSession({
                 文件：{item.version_name}
               </p>
             )}
+            <NoteExchange
+              note={{ ...item, kind: item.note_kind }}
+              className="mt-3"
+            />
             <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-500">
               {item.summary || "该项没有补充说明"}
             </p>

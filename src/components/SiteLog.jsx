@@ -22,7 +22,8 @@ import {
   fileSize,
   displayTime,
 } from "../library-api.js";
-import { NOTE_KINDS, noteKind } from "../notes.js";
+import { FILE_DIRECTIONS, NOTE_KINDS, noteKind } from "../notes.js";
+import NoteExchange from "./NoteExchange.jsx";
 import { beijingDate, splitNames } from "../model.js";
 import {
   Modal,
@@ -335,6 +336,10 @@ export function NoteComposer({
     [occurred, setOccurred] = useState(
       initial ? initial.occurred_on : beijingDate(),
     ),
+    [fileDirection, setFileDirection] = useState(initial?.file_direction || ""),
+    [counterparty, setCounterparty] = useState(initial?.counterparty || ""),
+    [exchangeTime, setExchangeTime] = useState(initial?.exchange_time || ""),
+    [channel, setChannel] = useState(initial?.channel || ""),
     [names, setNames] = useState(splitNames(initial?.people)),
     [deliverableId, setDeliverableId] = useState(
       initial?.deliverable_id || draft.deliverable_id || "",
@@ -359,6 +364,10 @@ export function NoteComposer({
     setDenied(true);
     setBody("");
     setNames([]);
+    setFileDirection("");
+    setCounterparty("");
+    setExchangeTime("");
+    setChannel("");
     setPending([]);
     uploaded.current.clear();
     setDeliverables([]);
@@ -386,6 +395,15 @@ export function NoteComposer({
       controller.current?.abort();
     };
   }, [project.id, user.id]);
+  function changeKind(next) {
+    setKind(next);
+    if (next !== "file") {
+      setFileDirection("");
+      setCounterparty("");
+      setExchangeTime("");
+      setChannel("");
+    }
+  }
   const tasks = records.filter((r) => r.project_id === project.id);
   function addFiles(list) {
     if (busy) return;
@@ -422,6 +440,10 @@ export function NoteComposer({
         people: names.join("、"),
         deliverable_id: deliverableId || null,
         task_id: taskId || null,
+        file_direction: kind === "file" ? fileDirection : "",
+        counterparty: kind === "file" ? counterparty : "",
+        exchange_time: kind === "file" ? exchangeTime : "",
+        channel: kind === "file" ? channel : "",
       };
       saved = (
         await (saved
@@ -603,7 +625,7 @@ export function NoteComposer({
                   key={k.id}
                   type="button"
                   aria-pressed={kind === k.id}
-                  onClick={() => setKind(k.id)}
+                  onClick={() => changeKind(k.id)}
                   className={
                     "rounded-xl px-3 py-1.5 text-[13px] ring-1 transition-colors " +
                     (kind === k.id
@@ -628,11 +650,21 @@ export function NoteComposer({
             />
           </Field>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field label="发生日期" hint="可以补记，例如前天在现场改的设置">
+            <Field
+              label="发生日期"
+              hint={
+                kind === "file"
+                  ? "文件往来发生的业务日期，可以补记；与登记时间分别保存。"
+                  : "可以补记，例如前天在现场改的设置"
+              }
+            >
               <input
                 type="date"
                 value={occurred}
-                onChange={(e) => setOccurred(e.target.value)}
+                onChange={(e) => {
+                  setOccurred(e.target.value);
+                  if (!e.target.value) setExchangeTime("");
+                }}
                 className={inputClass}
               />
             </Field>
@@ -653,6 +685,81 @@ export function NoteComposer({
               </select>
             </Field>
           </div>
+          {kind === "file" && (
+            <fieldset className="space-y-4 rounded-2xl border border-indigo-100 bg-indigo-50/30 p-4">
+              <legend className="px-1 text-[13px] font-medium text-slate-600">
+                文件收发信息（选填）
+              </legend>
+              <p className="text-xs leading-relaxed text-slate-400">
+                记录已经发生的文件往来；选择“发出”只登记事实，不会向外发送文件。
+              </p>
+              <Field label="收发方向">
+                <select
+                  className={inputClass}
+                  value={fileDirection}
+                  onChange={(e) => setFileDirection(e.target.value)}
+                >
+                  <option value="">未区分</option>
+                  {FILE_DIRECTIONS.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field
+                label={
+                  (fileDirection === "received"
+                    ? "提供方"
+                    : fileDirection === "sent"
+                      ? "接收方"
+                      : "往来方") + "（选填）"
+                }
+              >
+                <input
+                  value={counterparty}
+                  maxLength={200}
+                  onChange={(e) => setCounterparty(e.target.value)}
+                  placeholder={
+                    fileDirection === "received"
+                      ? "谁提供的，例如客户张工、设计院"
+                      : fileDirection === "sent"
+                        ? "交给谁，例如业主项目组、施工单位"
+                        : "往来人员或单位，未知可留空"
+                  }
+                  className={inputClass}
+                />
+              </Field>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Field
+                  label="具体时间（选填，北京时间）"
+                  hint={
+                    occurred
+                      ? "只填写已知的业务时间，未知可留空。"
+                      : "先填写发生日期；日期留空时不记录具体时间。"
+                  }
+                >
+                  <input
+                    type="time"
+                    step={60}
+                    value={exchangeTime}
+                    disabled={!occurred}
+                    onChange={(e) => setExchangeTime(e.target.value)}
+                    className={inputClass}
+                  />
+                </Field>
+                <Field label="渠道（选填）">
+                  <input
+                    value={channel}
+                    maxLength={100}
+                    onChange={(e) => setChannel(e.target.value)}
+                    placeholder="如微信、邮件、现场拷贝，可自由填写"
+                    className={inputClass}
+                  />
+                </Field>
+              </div>
+            </fieldset>
+          )}
           <Field label="关联任务（选填）">
             <select
               value={taskId}
@@ -923,7 +1030,11 @@ function NoteThread({
                   <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
                     <KindBadge kind={n.kind} />
                     <span>{n.parent_note_id ? "补充记录" : "原事项"}</span>
-                    <time>{dayOf(n)}</time>
+                    <time dateTime={dayOf(n)}>
+                      {n.kind === "file" && !n.occurred_on
+                        ? "按登记日显示：" + dayOf(n)
+                        : dayOf(n)}
+                    </time>
                     {n.deleted && (
                       <span className="rounded-full bg-rose-50 px-2 py-0.5 text-rose-600">
                         已删除
@@ -938,6 +1049,7 @@ function NoteThread({
                       相关人员：{n.people}
                     </p>
                   )}
+                  <NoteExchange note={n} />
                   <NoteFiles
                     files={n.files}
                     onOpenDocument={onOpenDocument}
@@ -1041,6 +1153,7 @@ export default function SiteLog({
     [loaded, setLoaded] = useState(false),
     [trash, setTrash] = useState(false),
     [kind, setKind] = useState(""),
+    [directionFilter, setDirectionFilter] = useState(""),
     [query, setQuery] = useState(""),
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState(""),
@@ -1136,6 +1249,11 @@ export default function SiteLog({
   const visible = notes.filter(
     (n) =>
       (!kind || n.kind === kind) &&
+      (!directionFilter ||
+        (n.kind === "file" &&
+          (directionFilter === "unclassified"
+            ? !n.file_direction
+            : n.file_direction === directionFilter))) &&
       (!q ||
         [
           n.body,
@@ -1143,6 +1261,8 @@ export default function SiteLog({
           n.author_name,
           n.deliverable_title,
           n.task_title,
+          n.counterparty,
+          n.channel,
           ...(n.files || []).map((f) => f.filename || f.title),
         ]
           .join(" ")
@@ -1163,7 +1283,7 @@ export default function SiteLog({
             随手记
           </h1>
           <p className="mt-1.5 text-sm text-slate-400">
-            现场改的设置、口头的约定、群里收到的文件，当天记下来；换人接手时按时间线就能查到。
+            现场改的设置、口头的约定、收到或发出的文件，当天记下来；换人接手时按时间线就能查到。
           </p>
         </div>
         <div className="flex shrink-0 gap-2">
@@ -1188,7 +1308,7 @@ export default function SiteLog({
             aria-label="搜索随手记"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索内容、人员、附件名"
+            placeholder="搜索内容、人员、往来方、渠道、附件名"
             className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-[13px] text-slate-700 shadow-sm outline-none placeholder:text-slate-300 focus:border-indigo-300 focus:ring-4 focus:ring-indigo-100"
           />
         </div>
@@ -1201,7 +1321,10 @@ export default function SiteLog({
             <button
               key={k.id || "all"}
               aria-pressed={kind === k.id}
-              onClick={() => setKind(k.id)}
+              onClick={() => {
+                setKind(k.id);
+                if (k.id !== "file") setDirectionFilter("");
+              }}
               className={
                 "rounded-lg px-3 py-1 text-xs font-medium " +
                 (kind === k.id
@@ -1213,6 +1336,23 @@ export default function SiteLog({
             </button>
           ))}
         </div>
+        <select
+          aria-label="收发筛选"
+          value={directionFilter}
+          onChange={(e) => {
+            setDirectionFilter(e.target.value);
+            if (e.target.value) setKind("file");
+          }}
+          className="max-w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-100"
+        >
+          <option value="">全部收发</option>
+          {FILE_DIRECTIONS.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.label}
+            </option>
+          ))}
+          <option value="unclassified">未区分收发</option>
+        </select>
         <button
           aria-pressed={trash}
           onClick={() => {
@@ -1278,6 +1418,11 @@ export default function SiteLog({
                     >
                       <div className="flex flex-wrap items-center gap-2">
                         <KindBadge kind={n.kind} />
+                        {n.kind === "file" && !n.occurred_on && (
+                          <span className="text-[11px] text-slate-400">
+                            业务日期未记录，按登记日分组
+                          </span>
+                        )}
                         <button
                           type="button"
                           className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] text-indigo-500 hover:underline"
@@ -1312,6 +1457,7 @@ export default function SiteLog({
                           相关人员：{n.people}
                         </p>
                       )}
+                      <NoteExchange note={n} />
                       <NoteFiles
                         files={n.files}
                         onOpenDocument={onOpenDocument}
@@ -1532,12 +1678,17 @@ export function TaskMaterials({ record, user, revision = 0, onAddNote }) {
             <li key={n.id} className="rounded-xl bg-slate-50 px-3 py-2">
               <div className="flex items-center gap-2 text-[11px] text-slate-400">
                 <KindBadge kind={n.kind} />
-                <span>{dayOf(n)}</span>
+                <span>
+                  {n.kind === "file" && !n.occurred_on
+                    ? "按登记日显示：" + dayOf(n)
+                    : dayOf(n)}
+                </span>
                 <span>{n.author_name}</span>
               </div>
               <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-600">
                 {n.body}
               </p>
+              <NoteExchange note={n} />
               <NoteFiles
                 files={n.files}
                 onUnauthorized={() => {

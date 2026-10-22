@@ -4,13 +4,13 @@ import {
   libraryTx as tx,
   resourceEvent,
 } from "./library-common.mjs";
-import { NOTE_KINDS } from "./src/notes.js";
+import { NOTE_KINDS, fileDirection } from "./src/notes.js";
 import { splitNames } from "./src/people.js";
 
 const now = () => new Date().toISOString();
 const excerpt = (body) => body.replace(/\s+/g, " ").slice(0, 80);
 export function installNotesSchema(db) {
-  db.exec(`CREATE TABLE IF NOT EXISTS project_notes(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),kind TEXT NOT NULL,body TEXT NOT NULL,occurred_on TEXT NOT NULL DEFAULT '',people TEXT NOT NULL DEFAULT '',deliverable_id TEXT REFERENCES document_deliverables(id),task_id TEXT REFERENCES records(id),author_id TEXT NOT NULL REFERENCES users(id),author_name TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,deleted INTEGER NOT NULL DEFAULT 0,created TEXT NOT NULL,updated TEXT NOT NULL,parent_note_id TEXT REFERENCES project_notes(id));
+  db.exec(`CREATE TABLE IF NOT EXISTS project_notes(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),kind TEXT NOT NULL,body TEXT NOT NULL,occurred_on TEXT NOT NULL DEFAULT '',people TEXT NOT NULL DEFAULT '',deliverable_id TEXT REFERENCES document_deliverables(id),task_id TEXT REFERENCES records(id),author_id TEXT NOT NULL REFERENCES users(id),author_name TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,deleted INTEGER NOT NULL DEFAULT 0,created TEXT NOT NULL,updated TEXT NOT NULL,parent_note_id TEXT REFERENCES project_notes(id),file_direction TEXT NOT NULL DEFAULT '',counterparty TEXT NOT NULL DEFAULT '',exchange_time TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT '');
     CREATE INDEX IF NOT EXISTS project_notes_project ON project_notes(project_id,deleted,occurred_on);
     CREATE INDEX IF NOT EXISTS project_notes_deliverable ON project_notes(deliverable_id,deleted);
     CREATE INDEX IF NOT EXISTS project_notes_task ON project_notes(task_id,deleted);
@@ -21,10 +21,23 @@ export function installNotesSchema(db) {
       .prepare("PRAGMA table_info(" + table + ")")
       .all()
       .map((c) => c.name);
-  if (!columns("project_notes").includes("parent_note_id"))
+  const noteColumns = columns("project_notes");
+  if (!noteColumns.includes("parent_note_id"))
     db.exec(
       "ALTER TABLE project_notes ADD COLUMN parent_note_id TEXT REFERENCES project_notes(id)",
     );
+  for (const column of [
+    "file_direction",
+    "counterparty",
+    "exchange_time",
+    "channel",
+  ])
+    if (!noteColumns.includes(column))
+      db.exec(
+        "ALTER TABLE project_notes ADD COLUMN " +
+          column +
+          " TEXT NOT NULL DEFAULT ''",
+      );
   const fileColumns = columns("project_note_files");
   if (!fileColumns.includes("version_id"))
     db.exec(
@@ -88,6 +101,41 @@ export function createNotes({ db }) {
     const people = pick("people", old.people || "");
     if (typeof people !== "string" || people.length > 300)
       fail(400, "相关人员最多 300 字");
+    const exchange = {
+      file_direction: "",
+      counterparty: "",
+      exchange_time: "",
+      channel: "",
+    };
+    if (kind === "file") {
+      for (const [key, maximum, label] of [
+        ["file_direction", 8, "收发方向"],
+        ["counterparty", 200, "往来方"],
+        ["exchange_time", 5, "收发时间"],
+        ["channel", 100, "收发渠道"],
+      ]) {
+        const value = pick(key, old[key] || "");
+        if (
+          typeof value !== "string" ||
+          value.length > maximum ||
+          /\x00/.test(value)
+        )
+          fail(400, label + "无效，最多 " + maximum + " 字");
+        exchange[key] = ["counterparty", "channel"].includes(key)
+          ? value.trim()
+          : value;
+      }
+      if (exchange.file_direction && !fileDirection(exchange.file_direction))
+        fail(400, "收发方向无效");
+      if (
+        exchange.exchange_time &&
+        (!/^([01]\d|2[0-3]):[0-5]\d$/.test(exchange.exchange_time) || !occurred)
+      )
+        fail(400, "收发时间应为北京时间 HH:mm，且须先填写发生日期");
+    } else if (
+      Object.keys(exchange).some((key) => b[key] !== undefined && b[key] !== "")
+    )
+      fail(400, "只有文件收发记录可以填写收发信息");
     const deliverableId =
       pick("deliverable_id", old.deliverable_id || null) || null;
     if (
@@ -120,6 +168,7 @@ export function createNotes({ db }) {
       people: splitNames(people).join("、"),
       deliverable_id: deliverableId,
       task_id: taskId,
+      ...exchange,
     };
   }
   const rootId = (n) => n.parent_note_id || n.id;
@@ -129,6 +178,10 @@ export function createNotes({ db }) {
     kind: n.kind,
     body: n.body,
     occurred_on: n.occurred_on,
+    file_direction: n.file_direction,
+    counterparty: n.counterparty,
+    exchange_time: n.exchange_time,
+    channel: n.channel,
     people: n.people,
     deliverable_id: n.deliverable_id,
     task_id: n.task_id,
@@ -251,13 +304,26 @@ export function createNotes({ db }) {
     if (list && method === "GET") {
       project(list[1]);
       const deleted = params?.get("deleted") === "1" ? 1 : 0;
+      const direction = params?.get("file_direction");
+      if (
+        (params?.getAll("file_direction").length || 0) > 1 ||
+        (direction != null &&
+          !["received", "sent", "unclassified"].includes(direction))
+      )
+        fail(400, "收发方向筛选无效");
+      const filters =
+        direction == null ? "" : " AND kind='file' AND file_direction=?";
+      const values = [list[1], deleted];
+      if (direction != null)
+        values.push(direction === "unclassified" ? "" : direction);
       return {
         data: {
           notes: all(
-            "SELECT * FROM project_notes WHERE project_id=? AND deleted=? " +
+            "SELECT * FROM project_notes WHERE project_id=? AND deleted=?" +
+              filters +
+              " " +
               order,
-            list[1],
-            deleted,
+            ...values,
           ).map(present),
         },
       };
@@ -285,7 +351,7 @@ export function createNotes({ db }) {
         created = now();
       tx(db, () => {
         run(
-          "INSERT INTO project_notes(id,project_id,kind,body,occurred_on,people,deliverable_id,task_id,author_id,author_name,created,updated,parent_note_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO project_notes(id,project_id,kind,body,occurred_on,people,deliverable_id,task_id,author_id,author_name,created,updated,parent_note_id,file_direction,counterparty,exchange_time,channel) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
           id,
           projectId,
           f.kind,
@@ -299,6 +365,10 @@ export function createNotes({ db }) {
           created,
           created,
           parentId,
+          f.file_direction,
+          f.counterparty,
+          f.exchange_time,
+          f.channel,
         );
         const saved = note(id);
         event(user, "create-note", saved, {
@@ -338,13 +408,17 @@ export function createNotes({ db }) {
       const f = fields(b, n.project_id, n);
       tx(db, () => {
         run(
-          "UPDATE project_notes SET kind=?,body=?,occurred_on=?,people=?,deliverable_id=?,task_id=?,version=version+1,updated=? WHERE id=?",
+          "UPDATE project_notes SET kind=?,body=?,occurred_on=?,people=?,deliverable_id=?,task_id=?,file_direction=?,counterparty=?,exchange_time=?,channel=?,version=version+1,updated=? WHERE id=?",
           f.kind,
           f.body,
           f.occurred_on,
           f.people,
           f.deliverable_id,
           f.task_id,
+          f.file_direction,
+          f.counterparty,
+          f.exchange_time,
+          f.channel,
           now(),
           n.id,
         );
