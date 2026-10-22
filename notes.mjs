@@ -10,12 +10,33 @@ import { splitNames } from "./src/people.js";
 const now = () => new Date().toISOString();
 const excerpt = (body) => body.replace(/\s+/g, " ").slice(0, 80);
 export function installNotesSchema(db) {
-  db.exec(`CREATE TABLE IF NOT EXISTS project_notes(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),kind TEXT NOT NULL,body TEXT NOT NULL,occurred_on TEXT NOT NULL DEFAULT '',people TEXT NOT NULL DEFAULT '',deliverable_id TEXT REFERENCES document_deliverables(id),task_id TEXT REFERENCES records(id),author_id TEXT NOT NULL REFERENCES users(id),author_name TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,deleted INTEGER NOT NULL DEFAULT 0,created TEXT NOT NULL,updated TEXT NOT NULL);
+  db.exec(`CREATE TABLE IF NOT EXISTS project_notes(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),kind TEXT NOT NULL,body TEXT NOT NULL,occurred_on TEXT NOT NULL DEFAULT '',people TEXT NOT NULL DEFAULT '',deliverable_id TEXT REFERENCES document_deliverables(id),task_id TEXT REFERENCES records(id),author_id TEXT NOT NULL REFERENCES users(id),author_name TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,deleted INTEGER NOT NULL DEFAULT 0,created TEXT NOT NULL,updated TEXT NOT NULL,parent_note_id TEXT REFERENCES project_notes(id));
     CREATE INDEX IF NOT EXISTS project_notes_project ON project_notes(project_id,deleted,occurred_on);
     CREATE INDEX IF NOT EXISTS project_notes_deliverable ON project_notes(deliverable_id,deleted);
     CREATE INDEX IF NOT EXISTS project_notes_task ON project_notes(task_id,deleted);
-    CREATE TABLE IF NOT EXISTS project_note_files(note_id TEXT NOT NULL REFERENCES project_notes(id),document_id TEXT NOT NULL REFERENCES documents(id),created TEXT NOT NULL,PRIMARY KEY(note_id,document_id));
+    CREATE TABLE IF NOT EXISTS project_note_files(note_id TEXT NOT NULL REFERENCES project_notes(id),document_id TEXT NOT NULL REFERENCES documents(id),created TEXT NOT NULL,version_id TEXT REFERENCES document_versions(id),link_version TEXT,PRIMARY KEY(note_id,document_id));
     CREATE INDEX IF NOT EXISTS project_note_files_document ON project_note_files(document_id);`);
+  const columns = (table) =>
+    db
+      .prepare("PRAGMA table_info(" + table + ")")
+      .all()
+      .map((c) => c.name);
+  if (!columns("project_notes").includes("parent_note_id"))
+    db.exec(
+      "ALTER TABLE project_notes ADD COLUMN parent_note_id TEXT REFERENCES project_notes(id)",
+    );
+  const fileColumns = columns("project_note_files");
+  if (!fileColumns.includes("version_id"))
+    db.exec(
+      "ALTER TABLE project_note_files ADD COLUMN version_id TEXT REFERENCES document_versions(id)",
+    );
+  if (!fileColumns.includes("link_version"))
+    db.exec("ALTER TABLE project_note_files ADD COLUMN link_version TEXT");
+  // A migration token protects later corrections without inventing a historical version.
+  db.exec(`UPDATE project_note_files SET link_version=lower(hex(randomblob(16))) WHERE link_version IS NULL;
+    CREATE INDEX IF NOT EXISTS project_notes_parent ON project_notes(parent_note_id,deleted);
+    CREATE TRIGGER IF NOT EXISTS project_notes_parent_immutable BEFORE UPDATE OF parent_note_id ON project_notes
+      WHEN NEW.parent_note_id IS NOT OLD.parent_note_id BEGIN SELECT RAISE(ABORT,'Note parent is immutable'); END;`);
 }
 export function createNotes({ db }) {
   installNotesSchema(db);
@@ -58,7 +79,7 @@ export function createNotes({ db }) {
     if (
       typeof occurred !== "string" ||
       (occurred &&
-        (!/^\d{4}-\d{2}-\d{2}$/.test(occurred) ||
+        (!/^(?!0000)\d{4}-\d{2}-\d{2}$/.test(occurred) ||
           !Number.isFinite(Date.parse(occurred + "T00:00:00Z")) ||
           new Date(occurred + "T00:00:00Z").toISOString().slice(0, 10) !==
             occurred))
@@ -101,10 +122,89 @@ export function createNotes({ db }) {
       task_id: taskId,
     };
   }
+  const rootId = (n) => n.parent_note_id || n.id;
+  const snapshot = (n) => ({
+    id: n.id,
+    project_id: n.project_id,
+    kind: n.kind,
+    body: n.body,
+    occurred_on: n.occurred_on,
+    people: n.people,
+    deliverable_id: n.deliverable_id,
+    task_id: n.task_id,
+    author_id: n.author_id,
+    author_name: n.author_name,
+    parent_note_id: n.parent_note_id,
+    thread_root_id: rootId(n),
+    version: n.version,
+    deleted: Boolean(n.deleted),
+    created: n.created,
+    updated: n.updated,
+  });
+  const files = (noteId) =>
+    all(
+      `SELECT d.id document_id,d.title,d.deleted,d.current_version_id,
+      f.version_id,f.link_version,f.created,v.number,v.filename,v.size,
+      CASE WHEN f.version_id IS NULL THEN 'unfixed' ELSE 'fixed' END reference_mode
+      FROM project_note_files f JOIN documents d ON d.id=f.document_id
+      LEFT JOIN document_versions v ON v.id=COALESCE(f.version_id,d.current_version_id) AND v.document_id=d.id
+      WHERE f.note_id=? ORDER BY f.created,d.title,d.id`,
+      noteId,
+    ).map((f) => ({ ...f, deleted: Boolean(f.deleted) }));
+  const file = (noteId, documentId) =>
+    files(noteId).find((f) => f.document_id === documentId);
+  const link = (noteId, documentId) =>
+    get(
+      "SELECT * FROM project_note_files WHERE note_id=? AND document_id=?",
+      noteId,
+      documentId,
+    );
+  const checkLinkVersion = (f, body) => {
+    if (
+      typeof body.link_version !== "string" ||
+      body.link_version !== f.link_version
+    )
+      fail(409, "附件引用已被修改，请刷新后重试");
+  };
+  const attachmentDocument = (documentId, projectId) => {
+    const d =
+      typeof documentId === "string" &&
+      get("SELECT * FROM documents WHERE id=? AND deleted=0", documentId);
+    if (!d || d.project_id !== projectId || d.sensitive)
+      fail(400, "只能附加当前项目的非敏感资料");
+    return d;
+  };
+  const attachmentVersion = (d, versionId) => {
+    const v =
+      typeof versionId === "string" &&
+      get(
+        "SELECT * FROM document_versions WHERE id=? AND document_id=?",
+        versionId,
+        d.id,
+      );
+    if (!v) fail(400, "附件版本无效或不属于该资料");
+    if (
+      v.conflict &&
+      v.id !== d.current_version_id &&
+      v.id !== d.published_version_id
+    )
+      fail(409, "请先采用待合并版本，再关联到随手记");
+    return v;
+  };
   function present(n) {
+    const root = rootId(n);
+    const counts = get(
+      "SELECT SUM(CASE WHEN deleted=0 THEN 1 ELSE 0 END) active,SUM(CASE WHEN deleted=1 THEN 1 ELSE 0 END) removed FROM project_notes WHERE project_id=? AND (id=? OR parent_note_id=?)",
+      n.project_id,
+      root,
+      root,
+    );
     return {
       ...n,
       deleted: Boolean(n.deleted),
+      thread_root_id: root,
+      thread_count: counts.active || 0,
+      thread_deleted_count: counts.removed || 0,
       deliverable_title: n.deliverable_id
         ? get(
             "SELECT title FROM document_deliverables WHERE id=?",
@@ -114,10 +214,7 @@ export function createNotes({ db }) {
       task_title: n.task_id
         ? get("SELECT task FROM records WHERE id=?", n.task_id)?.task || ""
         : "",
-      files: all(
-        "SELECT d.id document_id,d.title,d.deleted,d.current_version_id,v.filename,v.size FROM project_note_files f JOIN documents d ON d.id=f.document_id LEFT JOIN document_versions v ON v.id=d.current_version_id WHERE f.note_id=? ORDER BY f.created,d.title",
-        n.id,
-      ).map((f) => ({ ...f, deleted: Boolean(f.deleted) })),
+      files: files(n.id),
     };
   }
   const order =
@@ -126,7 +223,7 @@ export function createNotes({ db }) {
     route = route.replace(/^\/api(?=\/)/, "");
     const list = route.match(/^\/projects\/([\w-]+)\/notes$/);
     const item = route.match(
-      /^\/notes\/([\w-]+)(?:\/(restore|files)(?:\/([\w-]+))?)?$/,
+      /^\/notes\/([\w-]+)(?:\/(restore|files|thread)(?:\/([\w-]+))?)?$/,
     );
     const materials = route.match(/^\/records\/([\w-]+)\/materials$/);
     if (!list && !item && !materials) return null;
@@ -168,11 +265,27 @@ export function createNotes({ db }) {
     if (list && method === "POST") {
       const projectId = project(list[1]);
       const f = fields(b, projectId);
+      let parentId = b.parent_note_id === undefined ? null : b.parent_note_id;
+      if (parentId !== null) {
+        const parent =
+          typeof parentId === "string" &&
+          get(
+            "SELECT * FROM project_notes WHERE id=? AND project_id=? AND deleted=0",
+            parentId,
+            projectId,
+          );
+        if (!parent) fail(400, "补充的原记录无效或已删除");
+        const root = note(rootId(parent), true);
+        if (root.project_id !== projectId || root.parent_note_id)
+          fail(400, "原记录的事项关系无效");
+        parentId = root.id;
+      }
+      if (b.thread_root_id !== undefined) fail(400, "事项根记录由系统确定");
       const id = randomUUID(),
         created = now();
       tx(db, () => {
         run(
-          "INSERT INTO project_notes(id,project_id,kind,body,occurred_on,people,deliverable_id,task_id,author_id,author_name,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO project_notes(id,project_id,kind,body,occurred_on,people,deliverable_id,task_id,author_id,author_name,created,updated,parent_note_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
           id,
           projectId,
           f.kind,
@@ -185,17 +298,43 @@ export function createNotes({ db }) {
           user.name,
           created,
           created,
+          parentId,
         );
-        event(user, "create-note", { id, project_id: projectId, ...f });
+        const saved = note(id);
+        event(user, "create-note", saved, {
+          before: null,
+          after: snapshot(saved),
+        });
       });
       return { status: 201, data: { note: present(note(id)) } };
     }
     if (!item) fail(405, "不支持的随手记操作");
     const n = note(item[1], true);
     const [, , action, documentId] = item;
+    if (!action && method === "GET") return { data: { note: present(n) } };
+    if (action === "thread" && !documentId && method === "GET") {
+      const root = note(rootId(n), true);
+      return {
+        data: {
+          root: present(root),
+          notes: all(
+            "SELECT * FROM project_notes WHERE project_id=? AND (id=? OR parent_note_id=?) ORDER BY CASE WHEN occurred_on='' THEN date(created,'+8 hours') ELSE occurred_on END,created,id",
+            n.project_id,
+            root.id,
+            root.id,
+          ).map(present),
+        },
+      };
+    }
     if (!action && method === "PATCH") {
       if (n.deleted) fail(404, "记录不存在或已删除");
       checkVersion(n, b);
+      if (
+        (b.parent_note_id !== undefined &&
+          b.parent_note_id !== n.parent_note_id) ||
+        (b.thread_root_id !== undefined && b.thread_root_id !== rootId(n))
+      )
+        fail(400, "记录创建后不能更改所属事项");
       const f = fields(b, n.project_id, n);
       tx(db, () => {
         run(
@@ -216,6 +355,8 @@ export function createNotes({ db }) {
           { ...n, ...f },
           {
             ...(f.body !== n.body ? { from: n.body, to: f.body } : {}),
+            before: snapshot(n),
+            after: snapshot(note(n.id)),
           },
         );
       });
@@ -230,7 +371,10 @@ export function createNotes({ db }) {
           now(),
           n.id,
         );
-        event(user, "delete-note", n);
+        event(user, "delete-note", n, {
+          before: snapshot(n),
+          after: snapshot(note(n.id, true)),
+        });
       });
       return { data: { ok: true, version: n.version + 1 } };
     }
@@ -243,7 +387,10 @@ export function createNotes({ db }) {
           now(),
           n.id,
         );
-        event(user, "restore-note", n);
+        event(user, "restore-note", n, {
+          before: snapshot(n),
+          after: snapshot(note(n.id)),
+        });
       });
       return { data: { note: present(note(n.id)) } };
     }
@@ -251,45 +398,80 @@ export function createNotes({ db }) {
       if (n.deleted) fail(404, "记录不存在或已删除");
       // Attachments are their own collection, so linking does not bump the note version.
       if (method === "POST" && !documentId) {
-        const d =
-          typeof b.document_id === "string" &&
-          get(
-            "SELECT * FROM documents WHERE id=? AND deleted=0",
-            b.document_id,
-          );
-        if (!d || d.project_id !== n.project_id || d.sensitive)
-          fail(400, "只能附加当前项目的非敏感资料");
+        const d = attachmentDocument(b.document_id, n.project_id);
+        // Retries never change an existing association, even after a new upload.
+        if (link(n.id, d.id))
+          return { status: 201, data: { note: present(note(n.id)) } };
+        const v = attachmentVersion(
+          d,
+          b.version_id === undefined ? d.current_version_id : b.version_id,
+        );
         tx(db, () => {
           run(
-            "INSERT OR IGNORE INTO project_note_files(note_id,document_id,created) VALUES(?,?,?)",
+            "INSERT INTO project_note_files(note_id,document_id,created,version_id,link_version) VALUES(?,?,?,?,?)",
             n.id,
             d.id,
             now(),
+            v.id,
+            randomUUID(),
           );
           run("UPDATE project_notes SET updated=? WHERE id=?", now(), n.id);
           event(user, "attach-note", n, {
             document_id: d.id,
-            filename: d.title,
+            version_id: v.id,
+            filename: v.filename,
+            before: null,
+            after: file(n.id, d.id),
           });
         });
         return { status: 201, data: { note: present(note(n.id)) } };
       }
-      if (method === "DELETE" && documentId) {
-        if (
-          !get(
-            "SELECT 1 FROM project_note_files WHERE note_id=? AND document_id=?",
+      if (method === "PATCH" && documentId) {
+        const old = link(n.id, documentId);
+        if (!old) fail(404, "附件不存在");
+        checkLinkVersion(old, b);
+        const d = attachmentDocument(documentId, n.project_id);
+        const v = attachmentVersion(d, b.version_id);
+        if (old.version_id === v.id)
+          return { data: { note: present(note(n.id)) } };
+        tx(db, () => {
+          const before = file(n.id, documentId);
+          const result = run(
+            "UPDATE project_note_files SET version_id=?,link_version=? WHERE note_id=? AND document_id=? AND link_version=?",
+            v.id,
+            randomUUID(),
             n.id,
             documentId,
-          )
-        )
-          fail(404, "附件不存在");
+            b.link_version,
+          );
+          if (!result.changes) fail(409, "附件引用已被修改，请刷新后重试");
+          run("UPDATE project_notes SET updated=? WHERE id=?", now(), n.id);
+          event(user, "update-note-file", n, {
+            document_id: documentId,
+            version_id: v.id,
+            before,
+            after: file(n.id, documentId),
+          });
+        });
+        return { data: { note: present(note(n.id)) } };
+      }
+      if (method === "DELETE" && documentId) {
+        const old = link(n.id, documentId);
+        if (!old) fail(404, "附件不存在");
+        if (b.link_version !== undefined) checkLinkVersion(old, b);
         tx(db, () => {
+          const before = file(n.id, documentId);
           run(
             "DELETE FROM project_note_files WHERE note_id=? AND document_id=?",
             n.id,
             documentId,
           );
-          event(user, "detach-note", n, { document_id: documentId });
+          run("UPDATE project_notes SET updated=? WHERE id=?", now(), n.id);
+          event(user, "detach-note", n, {
+            document_id: documentId,
+            before,
+            after: null,
+          });
         });
         return { data: { note: present(note(n.id)) } };
       }

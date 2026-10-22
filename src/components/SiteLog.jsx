@@ -53,57 +53,271 @@ export function KindBadge({ kind }) {
     </span>
   );
 }
-export function NoteFiles({ files, onRemove }) {
+export function NoteFiles({
+  files,
+  onRemove,
+  onChooseVersion,
+  onOpenDocument,
+  onUnauthorized,
+}) {
+  const [downloadError, setDownloadError] = useState("");
+  const live = useRef(true);
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+  async function download(file, versionId) {
+    setDownloadError("");
+    try {
+      // Native streaming downloads do not expose HTTP errors to JavaScript.
+      // Check the private endpoint first so an expired session clears its UI.
+      const result = await api("/documents/" + file.document_id);
+      if (!live.current) return;
+      if (result.document?.deleted || result.document?.sensitive)
+        throw new Error("资料已删除或受限，无法下载");
+      const targetVersion = versionId || result.document?.current_version_id;
+      if (!targetVersion) throw new Error("资料暂无可下载版本");
+      await internalDownload(
+        "/documents/" +
+          file.document_id +
+          "/versions/" +
+          targetVersion +
+          "/download",
+        versionId
+          ? file.filename || file.title
+          : result.document?.filename || file.filename || file.title,
+      );
+    } catch (e) {
+      if (!live.current) return;
+      if (e.status === 401) onUnauthorized?.();
+      else setDownloadError(e.message);
+    }
+  }
   if (!files?.length) return null;
   return (
-    <ul className="mt-2 flex flex-wrap gap-1.5">
-      {files.map((f) => (
-        <li
-          key={f.document_id}
-          className="inline-flex max-w-full items-center gap-1 rounded-lg bg-slate-50 px-2 py-1 text-xs text-slate-500 ring-1 ring-slate-100"
-        >
-          <Paperclip className="h-3 w-3 shrink-0" />
-          {f.deleted || !f.current_version_id ? (
-            <span className="truncate line-through">{f.title}（已删除）</span>
-          ) : (
-            <button
-              type="button"
-              className="truncate hover:text-indigo-600 hover:underline"
-              title={"下载 " + (f.filename || f.title)}
-              onClick={() =>
-                internalDownload(
-                  "/documents/" +
-                    f.document_id +
-                    "/versions/" +
-                    f.current_version_id +
-                    "/download",
-                  f.filename || f.title,
-                )
-              }
+    <>
+      <ul className="mt-2 flex flex-wrap gap-1.5">
+        {files.map((f) => {
+          const fixed = !!f.version_id;
+          const filename = f.filename || f.title;
+          return (
+            <li
+              key={f.document_id}
+              className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg bg-slate-50 px-2 py-1 text-xs text-slate-500 ring-1 ring-slate-100"
             >
-              {f.filename || f.title}
-            </button>
-          )}
-          {f.size > 0 && (
-            <span className="shrink-0 text-slate-300">{fileSize(f.size)}</span>
-          )}
-          {onRemove && (
-            <button
-              type="button"
-              aria-label={"移除附件：" + (f.filename || f.title)}
-              className="shrink-0 rounded p-0.5 text-slate-300 hover:text-rose-500"
-              onClick={() => onRemove(f)}
+              <Paperclip className="h-3 w-3 shrink-0" />
+              {f.deleted ? (
+                <span className="min-w-0 truncate line-through">
+                  {filename}（已删除）
+                </span>
+              ) : fixed ? (
+                <button
+                  type="button"
+                  className="min-w-0 truncate hover:text-indigo-600 hover:underline"
+                  title={"下载当时版本：" + filename}
+                  onClick={() => download(f, f.version_id)}
+                >
+                  {filename}
+                </button>
+              ) : (
+                <span className="min-w-0 truncate">{filename}</span>
+              )}
+              <span
+                className={
+                  fixed ? "shrink-0 text-indigo-500" : "shrink-0 text-amber-600"
+                }
+              >
+                {fixed ? "当时 V" + (f.number || "?") : "未固定版本"}
+              </span>
+              {f.size > 0 && (
+                <span className="shrink-0 text-slate-400">
+                  {fileSize(f.size)}
+                </span>
+              )}
+              {!f.deleted && f.current_version_id && (
+                <button
+                  type="button"
+                  className="shrink-0 text-indigo-500 hover:underline"
+                  aria-label={"查看最新版：" + filename}
+                  onClick={() =>
+                    onOpenDocument
+                      ? onOpenDocument(f.document_id)
+                      : download(f, null)
+                  }
+                >
+                  {onOpenDocument ? "查看最新版" : "下载最新版"}
+                </button>
+              )}
+              {!f.deleted && onChooseVersion && (
+                <button
+                  type="button"
+                  className="shrink-0 text-slate-500 hover:text-indigo-600 hover:underline"
+                  aria-label={"选择附件版本：" + filename}
+                  onClick={() => onChooseVersion(f)}
+                >
+                  {fixed ? "更正版本" : "选择版本"}
+                </button>
+              )}
+              {onRemove && (
+                <button
+                  type="button"
+                  aria-label={"移除附件：" + filename}
+                  className="shrink-0 rounded p-0.5 text-slate-400 hover:text-rose-500"
+                  onClick={() => onRemove(f)}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {downloadError && (
+        <p role="alert" className="mt-1 text-xs text-rose-500">
+          {downloadError}
+        </p>
+      )}
+    </>
+  );
+}
+function AttachmentVersionDialog({
+  projectId,
+  noteId,
+  file,
+  onClose,
+  onSaved,
+  onUnauthorized,
+}) {
+  const [versions, setVersions] = useState([]),
+    [selected, setSelected] = useState(file.version_id || ""),
+    [loaded, setLoaded] = useState(false),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const live = useRef(true),
+    saving = useRef(false);
+  useEffect(() => {
+    live.current = true;
+    api("/documents/" + file.document_id)
+      .then((result) => {
+        if (!live.current) return;
+        if (result.document?.project_id !== projectId)
+          throw new Error("附件不属于当前项目");
+        setVersions(result.versions || []);
+        setLoaded(true);
+      })
+      .catch((e) => {
+        if (!live.current) return;
+        if (e.status === 401) {
+          onUnauthorized?.();
+          onClose();
+          return;
+        }
+        setError(e);
+        setLoaded(true);
+      });
+    return () => {
+      live.current = false;
+    };
+  }, [projectId, file.document_id]);
+  async function save(e) {
+    e.preventDefault();
+    if (saving.current || !selected) return;
+    saving.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api(
+        "/notes/" + noteId + "/files/" + file.document_id,
+        "PATCH",
+        { version_id: selected, link_version: file.link_version },
+      );
+      if (!live.current) return;
+      try {
+        await onSaved(result.note);
+        onClose();
+      } catch {
+        if (live.current)
+          setError("附件版本已固定，列表刷新失败，请关闭后刷新查看。");
+      }
+    } catch (e) {
+      if (!live.current) return;
+      if (e.status === 401) {
+        onUnauthorized?.();
+        onClose();
+        return;
+      }
+      setError(
+        e.status === 409 ? e.message + "；请关闭后重新打开再选择版本。" : e,
+      );
+    } finally {
+      saving.current = false;
+      if (live.current) setBusy(false);
+    }
+  }
+  return (
+    <Modal
+      title="选择附件版本"
+      sub={file.title + " · 人工确认当时使用的版本"}
+      icon={Paperclip}
+      onClose={() => !busy && onClose()}
+    >
+      <form onSubmit={save}>
+        <div className="space-y-4 px-6">
+          <p className="text-xs leading-relaxed text-slate-500">
+            {file.version_id
+              ? "更正后，记录将引用所选版本。"
+              : "这条历史关联未固定版本，无法自动恢复当时版本；请核实后选择。"}
+          </p>
+          <Field label="文件版本">
+            <select
+              className={inputClass}
+              value={selected}
+              disabled={!loaded || busy}
+              onChange={(e) => setSelected(e.target.value)}
             >
-              <X className="h-3 w-3" />
-            </button>
-          )}
-        </li>
-      ))}
-    </ul>
+              <option value="">请选择版本</option>
+              {versions.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {"V" +
+                    v.number +
+                    " · " +
+                    v.filename +
+                    (v.conflict ? "（冲突版）" : "")}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        <FormError error={error} />
+        <div className="flex justify-end gap-2 px-6 py-5">
+          <button
+            type="button"
+            className={secondary}
+            disabled={busy}
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button className={primary} disabled={!selected || busy || !loaded}>
+            {busy ? "保存中…" : "确认固定版本"}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 // Shared by the timeline, the checklist ("记一条") and task details.
-export function NoteDialog({
+export function NoteDialog(props) {
+  const key = [
+    props.project.id,
+    props.user?.id,
+    props.note?.id || props.draft?.parent_note_id || "new",
+  ].join(":");
+  return props.user ? <NoteComposer key={key} {...props} /> : null;
+}
+export function NoteComposer({
   project,
   user,
   records = [],
@@ -112,6 +326,8 @@ export function NoteDialog({
   draft = {},
   onClose,
   onSaved,
+  onUnauthorized,
+  onOpenDocument,
 }) {
   const [note, setNote] = useState(initial || null),
     [kind, setKind] = useState(initial?.kind || draft.kind || "site"),
@@ -125,20 +341,51 @@ export function NoteDialog({
     ),
     [taskId, setTaskId] = useState(initial?.task_id || draft.task_id || ""),
     [deliverables, setDeliverables] = useState([]),
+    [documents, setDocuments] = useState(null),
+    [documentId, setDocumentId] = useState(""),
+    [versionFile, setVersionFile] = useState(null),
+    [denied, setDenied] = useState(false),
     [pending, setPending] = useState([]),
     [progress, setProgress] = useState(""),
     [busy, setBusy] = useState(false),
     [dragging, setDragging] = useState(false),
     [error, setError] = useState("");
+  const live = useRef(true),
+    saving = useRef(false),
+    uploaded = useRef(new Map()),
+    controller = useRef(null);
+  function unauthorized(e) {
+    if (e?.status !== 401) return false;
+    setDenied(true);
+    setBody("");
+    setNames([]);
+    setPending([]);
+    uploaded.current.clear();
+    setDeliverables([]);
+    setDeliverableId("");
+    setTaskId("");
+    setDocuments(null);
+    setVersionFile(null);
+    setNote(null);
+    setError("");
+    controller.current?.abort();
+    onUnauthorized?.();
+    onClose();
+    return true;
+  }
   useEffect(() => {
-    let live = true;
+    live.current = true;
+    controller.current = new AbortController();
     api("/projects/" + project.id + "/deliverables")
-      .then((r) => live && setDeliverables(r.items))
-      .catch(() => {});
+      .then((r) => live.current && setDeliverables(r.items))
+      .catch((e) => {
+        if (live.current) unauthorized(e);
+      });
     return () => {
-      live = false;
+      live.current = false;
+      controller.current?.abort();
     };
-  }, [project.id]);
+  }, [project.id, user.id]);
   const tasks = records.filter((r) => r.project_id === project.id);
   function addFiles(list) {
     if (busy) return;
@@ -151,8 +398,19 @@ export function NoteDialog({
       ),
     ]);
   }
+  async function publishSaved(saved, options) {
+    try {
+      await onSaved(saved, options);
+    } catch (e) {
+      if (!live.current) return;
+      if (unauthorized(e)) return;
+      setError("内容已保存，列表刷新失败，请关闭后刷新查看。");
+    }
+  }
   async function submit(e) {
     e.preventDefault();
+    if (saving.current || denied) return;
+    saving.current = true;
     setBusy(true);
     setError("");
     let saved = note;
@@ -171,70 +429,93 @@ export function NoteDialog({
               ...fields,
               version: saved.version,
             })
-          : api("/projects/" + project.id + "/notes", "POST", fields))
+          : api("/projects/" + project.id + "/notes", "POST", {
+              ...fields,
+              parent_note_id: draft.parent_note_id || null,
+            }))
       ).note;
+      if (!live.current) return;
       setNote(saved);
-      // The text is saved before any upload, so a failed attachment never loses it.
       const failed = [];
       if (pending.length) {
         const folder = await ensureFolder(project.id, ATTACHMENT_FOLDER);
+        if (!live.current) return;
         for (const [index, file] of pending.entries()) {
           try {
-            const result = await uploadFile(
-              file,
-              {
-                title: file.name,
-                folder_id: folder,
-                category: ATTACHMENT_FOLDER,
-                description: body.trim().slice(0, 200),
-                task_id: taskId || null,
-                tags: [noteKind(kind).label],
-              },
-              {
-                userId: user.id,
-                projectId: project.id,
-                onProgress: ({ loaded, total }) =>
-                  setProgress(
-                    "附件 " +
-                      (index + 1) +
-                      "/" +
-                      pending.length +
-                      " · " +
-                      Math.round((loaded / Math.max(total, 1)) * 100) +
-                      "%",
-                  ),
-              },
-            );
-            saved = (
+            let result = uploaded.current.get(file);
+            if (!result) {
+              result = await uploadFile(
+                file,
+                {
+                  title: file.name,
+                  folder_id: folder,
+                  category: ATTACHMENT_FOLDER,
+                  description: body.trim().slice(0, 200),
+                  task_id: taskId || null,
+                  tags: [noteKind(kind).label],
+                },
+                {
+                  userId: user.id,
+                  projectId: project.id,
+                  signal: controller.current?.signal,
+                  onProgress: ({ loaded, total }) =>
+                    live.current &&
+                    setProgress(
+                      "附件 " +
+                        (index + 1) +
+                        "/" +
+                        pending.length +
+                        " · " +
+                        Math.round((loaded / Math.max(total, 1)) * 100) +
+                        "%",
+                    ),
+                },
+              );
+              if (!live.current) return;
+              uploaded.current.set(file, result);
+            }
+            if (!result.version_id)
+              throw new Error("上传未返回固定版本，请刷新资料库核实");
+            const attached = (
               await api("/notes/" + saved.id + "/files", "POST", {
                 document_id: result.document_id,
+                version_id: result.version_id,
               })
             ).note;
+            saved = { ...saved, files: attached.files };
+            if (!live.current) return;
+            setNote(saved);
+            uploaded.current.delete(file);
           } catch (uploadError) {
+            if (!live.current || unauthorized(uploadError)) return;
             failed.push({ file, message: uploadError.message });
           }
         }
-        setNote(saved);
       }
+      if (!live.current) return;
+      setPending(failed.map((f) => f.file));
       if (failed.length) {
-        setPending(failed.map((f) => f.file));
         setError(
-          "内容已保存，以下附件未上传成功，可再点保存重试：" +
+          "内容已保存，以下附件未关联成功，可再点保存重试：" +
             failed.map((f) => f.file.name + "（" + f.message + "）").join("、"),
         );
-        await onSaved(saved, { keepOpen: true });
+        await publishSaved(saved, { keepOpen: true });
         return;
       }
-      await onSaved(saved);
+      await publishSaved(saved);
     } catch (e) {
-      setError(e);
+      if (live.current && !unauthorized(e)) setError(e);
     } finally {
-      setBusy(false);
-      setProgress("");
+      saving.current = false;
+      if (live.current) {
+        setBusy(false);
+        setProgress("");
+      }
     }
   }
   async function detach(file) {
-    if (busy) return;
+    if (saving.current) return;
+    saving.current = true;
     setBusy(true);
     setError("");
     try {
@@ -242,21 +523,71 @@ export function NoteDialog({
         await api(
           "/notes/" + note.id + "/files/" + file.document_id,
           "DELETE",
-          {},
+          { link_version: file.link_version },
         )
       ).note;
-      setNote(next);
-      await onSaved(next, { keepOpen: true });
+      if (!live.current) return;
+      setNote((current) => ({ ...current, files: next.files }));
+      await publishSaved(next, { keepOpen: true });
     } catch (e) {
-      setError(e);
+      if (live.current && !unauthorized(e)) setError(e);
     } finally {
-      setBusy(false);
+      saving.current = false;
+      if (live.current) setBusy(false);
     }
   }
+  async function loadDocuments() {
+    if (saving.current) return;
+    saving.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api("/projects/" + project.id + "/documents");
+      if (live.current) setDocuments(result.documents || []);
+    } catch (e) {
+      if (live.current && !unauthorized(e)) setError(e);
+    } finally {
+      saving.current = false;
+      if (live.current) setBusy(false);
+    }
+  }
+  async function attachExisting() {
+    if (saving.current || !note || !documentId) return;
+    const doc = documents?.find((d) => d.id === documentId);
+    if (!doc?.current_version_id) return;
+    saving.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      const next = (
+        await api("/notes/" + note.id + "/files", "POST", {
+          document_id: doc.id,
+          version_id: doc.current_version_id,
+        })
+      ).note;
+      if (!live.current) return;
+      setNote((current) => ({ ...current, files: next.files }));
+      setDocumentId("");
+      await publishSaved(next, { keepOpen: true });
+    } catch (e) {
+      if (live.current && !unauthorized(e)) setError(e);
+    } finally {
+      saving.current = false;
+      if (live.current) setBusy(false);
+    }
+  }
+  if (denied) return null;
   return (
     <Modal
-      title={note ? "编辑随手记" : "记一条随手记"}
-      sub={project.name + " · 现场设置、口头约定、群里的文件，当天记下来"}
+      title={
+        note ? "编辑随手记" : draft.parent_note_id ? "补充一条" : "记一条随手记"
+      }
+      sub={
+        project.name +
+        (draft.parent_note_id || initial?.parent_note_id
+          ? " · 同一事项的独立补充，可填写自己的发生日期与附件"
+          : " · 现场设置、口头约定、群里的文件，当天记下来")
+      }
       icon={NotebookPen}
       onClose={() => !busy && onClose()}
     >
@@ -349,7 +680,55 @@ export function NoteDialog({
               附件（选填）
             </legend>
             {note && (
-              <NoteFiles files={note.files} onRemove={busy ? null : detach} />
+              <NoteFiles
+                files={note.files}
+                onRemove={busy ? null : detach}
+                onChooseVersion={busy ? null : setVersionFile}
+                onOpenDocument={onOpenDocument}
+                onUnauthorized={() => unauthorized({ status: 401 })}
+              />
+            )}
+            {note && (
+              <div className="mt-3 space-y-2">
+                {documents === null ? (
+                  <button
+                    type="button"
+                    className="text-xs text-indigo-500 hover:underline"
+                    onClick={loadDocuments}
+                  >
+                    关联已有资料
+                  </button>
+                ) : (
+                  <div className="flex min-w-0 flex-wrap gap-2">
+                    <select
+                      aria-label="选择已有资料"
+                      value={documentId}
+                      onChange={(e) => setDocumentId(e.target.value)}
+                      className={inputClass + " min-w-0 flex-1"}
+                    >
+                      <option value="">选择已有资料</option>
+                      {documents
+                        .filter((d) => !d.deleted && d.current_version_id)
+                        .map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.title}
+                          </option>
+                        ))}
+                    </select>
+                    <button
+                      type="button"
+                      className={secondary}
+                      disabled={!documentId}
+                      onClick={attachExisting}
+                    >
+                      固定并关联
+                    </button>
+                  </div>
+                )}
+                <p className="text-xs text-slate-400">
+                  关联时固定所选资料的版本。新记录请先保存内容，再关联已有资料。
+                </p>
+              </div>
             )}
             <label
               onDragOver={(e) => {
@@ -438,11 +817,212 @@ export function NoteDialog({
           </button>
         </div>
       </form>
+      {versionFile && (
+        <AttachmentVersionDialog
+          projectId={project.id}
+          noteId={note.id}
+          file={versionFile}
+          onClose={() => setVersionFile(null)}
+          onUnauthorized={() => unauthorized({ status: 401 })}
+          onSaved={async (next) => {
+            setNote((current) => ({ ...current, files: next.files }));
+            await publishSaved(next, { keepOpen: true });
+          }}
+        />
+      )}
     </Modal>
   );
 }
 function dayOf(note) {
   return note.occurred_on || beijingDate(new Date(note.created));
+}
+function NoteThread({
+  noteId,
+  project,
+  revision,
+  onClose,
+  onCreate,
+  onEdit,
+  onOpenTask,
+  onOpenDocument,
+  onChanged,
+  onUnauthorized,
+}) {
+  const [thread, setThread] = useState(null),
+    [error, setError] = useState(""),
+    [versionChoice, setVersionChoice] = useState(null),
+    [localRevision, setLocalRevision] = useState(0);
+  const seq = useRef(0);
+  useEffect(() => {
+    const serial = ++seq.current;
+    setThread(null);
+    setError("");
+    setVersionChoice(null);
+    api("/notes/" + noteId + "/thread")
+      .then((result) => {
+        if (serial !== seq.current) return;
+        if (
+          result.root?.project_id !== project.id ||
+          result.notes?.some((n) => n.project_id !== project.id)
+        )
+          throw new Error("这条记录不属于当前项目，请从所属项目打开。");
+        setThread(result);
+      })
+      .catch((e) => {
+        if (serial !== seq.current) return;
+        if (e.status === 401) {
+          onClose();
+          onUnauthorized?.();
+          return;
+        }
+        setError(e.message);
+      });
+    return () => {
+      seq.current++;
+    };
+  }, [noteId, project.id, revision, localRevision]);
+  const active =
+    thread?.notes.find((n) => n.id === noteId && !n.deleted) ||
+    thread?.notes.find((n) => !n.deleted);
+  return (
+    <Modal
+      title="事项详情"
+      sub={project.name + " · 按发生日期查看原记录和补充"}
+      icon={NotebookPen}
+      onClose={onClose}
+      wide
+    >
+      <div className="space-y-4 px-6 pb-6">
+        {error ? (
+          <p role="alert" className="text-sm text-rose-500">
+            {error}
+          </p>
+        ) : !thread ? (
+          <p role="status" className="py-6 text-sm text-slate-400">
+            正在加载事项…
+          </p>
+        ) : (
+          <>
+            {thread.root.deleted && (
+              <p className="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">
+                原事项已删除，已有补充仍保留。
+              </p>
+            )}
+            <ol className="space-y-3">
+              {thread.notes.map((n) => (
+                <li
+                  key={n.id}
+                  data-thread-note-id={n.id}
+                  className={
+                    "rounded-2xl border p-4 " +
+                    (n.id === noteId
+                      ? "border-indigo-200 bg-indigo-50/30"
+                      : "border-slate-200 bg-white")
+                  }
+                >
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                    <KindBadge kind={n.kind} />
+                    <span>{n.parent_note_id ? "补充记录" : "原事项"}</span>
+                    <time>{dayOf(n)}</time>
+                    {n.deleted && (
+                      <span className="rounded-full bg-rose-50 px-2 py-0.5 text-rose-600">
+                        已删除
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700">
+                    {n.body}
+                  </p>
+                  {n.people && (
+                    <p className="mt-2 text-xs text-slate-400">
+                      相关人员：{n.people}
+                    </p>
+                  )}
+                  <NoteFiles
+                    files={n.files}
+                    onOpenDocument={onOpenDocument}
+                    onUnauthorized={() => {
+                      onClose();
+                      onUnauthorized?.();
+                    }}
+                    onChooseVersion={
+                      n.deleted
+                        ? null
+                        : (file) => setVersionChoice({ note: n, file })
+                    }
+                  />
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2 text-xs text-slate-400">
+                    <span>
+                      {n.author_name} 记录于 {displayTime(n.created)}
+                      {n.version > 1 ? " · 已修改" : ""}
+                    </span>
+                    <div className="flex flex-wrap gap-3">
+                      {n.task_id && (
+                        <button
+                          type="button"
+                          className="text-indigo-500 hover:underline"
+                          onClick={() => onOpenTask?.(n.task_id)}
+                        >
+                          关联任务
+                        </button>
+                      )}
+                      {!n.deleted && (
+                        <>
+                          <button
+                            type="button"
+                            className="text-indigo-500 hover:underline"
+                            aria-label={"编辑事项记录：" + n.body.slice(0, 20)}
+                            onClick={() => onEdit(n)}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            className="text-indigo-500 hover:underline"
+                            onClick={() => onCreate({ parent_note_id: n.id })}
+                          >
+                            补充一条
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            {active && (
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  className={primary}
+                  onClick={() => onCreate({ parent_note_id: active.id })}
+                >
+                  <Plus className="h-4 w-4" />
+                  补充一条
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      {versionChoice && (
+        <AttachmentVersionDialog
+          projectId={project.id}
+          noteId={versionChoice.note.id}
+          file={versionChoice.file}
+          onClose={() => setVersionChoice(null)}
+          onUnauthorized={() => {
+            onClose();
+            onUnauthorized?.();
+          }}
+          onSaved={async () => {
+            setLocalRevision((n) => n + 1);
+            await onChanged?.();
+          }}
+        />
+      )}
+    </Modal>
+  );
 }
 export default function SiteLog({
   project,
@@ -452,6 +1032,9 @@ export default function SiteLog({
   onCreate,
   onEdit,
   onOpenTask,
+  onOpenDocument,
+  initialNoteId,
+  onUnauthorized,
   onChanged = () => {},
 }) {
   const [notes, setNotes] = useState([]),
@@ -462,7 +1045,22 @@ export default function SiteLog({
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState(""),
     [error, setError] = useState("");
-  const seq = useRef(0);
+  const [threadNoteId, setThreadNoteId] = useState(initialNoteId || null),
+    [versionChoice, setVersionChoice] = useState(null),
+    [denied, setDenied] = useState(false);
+  const seq = useRef(0),
+    actionSeq = useRef(0);
+  const authFailed = useCallback(() => {
+    setDenied(true);
+    setNotes([]);
+    setThreadNoteId(null);
+    setVersionChoice(null);
+    setQuery("");
+    onUnauthorized?.();
+  }, [onUnauthorized]);
+  useEffect(() => {
+    setThreadNoteId(initialNoteId || null);
+  }, [initialNoteId]);
   const load = useCallback(async () => {
     if (!project || !user) return;
     const serial = ++seq.current;
@@ -476,18 +1074,32 @@ export default function SiteLog({
       setError("");
     } catch (e) {
       if (serial === seq.current) {
+        if (e.status === 401) {
+          authFailed();
+          return;
+        }
         setError(e.message);
         setLoaded(true);
       }
     }
-  }, [project?.id, user?.id, trash]);
+  }, [project?.id, user?.id, trash, authFailed]);
   useEffect(() => {
     load();
     return () => {
       seq.current++;
     };
   }, [load, revision]);
-  if (!user)
+  useEffect(() => {
+    setNotes([]);
+    setLoaded(false);
+    setThreadNoteId(initialNoteId || null);
+    setVersionChoice(null);
+    setDenied(false);
+    return () => {
+      actionSeq.current++;
+    };
+  }, [project?.id, user?.id]);
+  if (!user || denied)
     return (
       <div className="mt-8 rounded-2xl border border-slate-200 bg-white px-6 py-14 text-center">
         <NotebookPen className="mx-auto h-8 w-8 text-slate-300" />
@@ -501,18 +1113,23 @@ export default function SiteLog({
       </div>
     );
   async function act(work, message) {
+    const serial = ++actionSeq.current;
     setBusy(true);
     setError("");
     setNotice("");
     try {
       await work();
+      if (serial !== actionSeq.current) return;
       setNotice(message);
       await load();
       onChanged();
     } catch (e) {
-      setError(e.message);
+      if (serial === actionSeq.current) {
+        if (e.status === 401) authFailed();
+        else setError(e.message);
+      }
     } finally {
-      setBusy(false);
+      if (serial === actionSeq.current) setBusy(false);
     }
   }
   const q = query.trim().toLocaleLowerCase();
@@ -526,7 +1143,7 @@ export default function SiteLog({
           n.author_name,
           n.deliverable_title,
           n.task_title,
-          ...n.files.map((f) => f.filename || f.title),
+          ...(n.files || []).map((f) => f.filename || f.title),
         ]
           .join(" ")
           .toLocaleLowerCase()
@@ -661,6 +1278,16 @@ export default function SiteLog({
                     >
                       <div className="flex flex-wrap items-center gap-2">
                         <KindBadge kind={n.kind} />
+                        <button
+                          type="button"
+                          className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] text-indigo-500 hover:underline"
+                          onClick={() => setThreadNoteId(n.id)}
+                        >
+                          {n.parent_note_id ? "补充 · 查看原事项" : "查看事项"}
+                          {n.thread_count > 1
+                            ? " · " + n.thread_count + " 条"
+                            : ""}
+                        </button>
                         {n.deliverable_title && (
                           <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-600">
                             <ClipboardCheck className="h-3 w-3" />
@@ -685,7 +1312,16 @@ export default function SiteLog({
                           相关人员：{n.people}
                         </p>
                       )}
-                      <NoteFiles files={n.files} />
+                      <NoteFiles
+                        files={n.files}
+                        onOpenDocument={onOpenDocument}
+                        onUnauthorized={authFailed}
+                        onChooseVersion={
+                          trash
+                            ? null
+                            : (file) => setVersionChoice({ note: n, file })
+                        }
+                      />
                       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-50 pt-2 text-[11px] text-slate-400">
                         <span>
                           {n.author_name} 记录于 {displayTime(n.created)}
@@ -713,6 +1349,16 @@ export default function SiteLog({
                             </button>
                           ) : (
                             <>
+                              <button
+                                type="button"
+                                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 hover:bg-indigo-50 hover:text-indigo-600"
+                                onClick={() =>
+                                  onCreate({ parent_note_id: n.id })
+                                }
+                              >
+                                <Plus className="h-3 w-3" />
+                                补充一条
+                              </button>
                               <button
                                 aria-label={
                                   "编辑随手记：" + n.body.slice(0, 20)
@@ -759,6 +1405,34 @@ export default function SiteLog({
           </ol>
         )}
       </div>
+      {threadNoteId && (
+        <NoteThread
+          key={project.id + ":" + threadNoteId}
+          noteId={threadNoteId}
+          project={project}
+          revision={revision}
+          onClose={() => setThreadNoteId(null)}
+          onCreate={onCreate}
+          onEdit={onEdit}
+          onOpenTask={onOpenTask}
+          onOpenDocument={onOpenDocument}
+          onChanged={onChanged}
+          onUnauthorized={authFailed}
+        />
+      )}
+      {versionChoice && (
+        <AttachmentVersionDialog
+          projectId={project.id}
+          noteId={versionChoice.note.id}
+          file={versionChoice.file}
+          onClose={() => setVersionChoice(null)}
+          onUnauthorized={authFailed}
+          onSaved={async () => {
+            await load();
+            await onChanged();
+          }}
+        />
+      )}
     </section>
   );
 }
@@ -767,16 +1441,30 @@ export function TaskMaterials({ record, user, revision = 0, onAddNote }) {
   const [data, setData] = useState(null),
     [error, setError] = useState("");
   useEffect(() => {
+    setData(null);
+    setError("");
     if (!user) return;
     let live = true;
     api("/records/" + record.id + "/materials")
-      .then((r) => live && (setData(r), setError("")))
-      .catch((e) => live && setError(e.message));
+      .then(
+        (r) =>
+          live &&
+          (setData({ ...r, recordId: record.id, userId: user.id }),
+          setError("")),
+      )
+      .catch((e) => {
+        if (live) {
+          setData(null);
+          setError(e.message);
+        }
+      });
     return () => {
       live = false;
     };
   }, [record.id, user?.id, revision]);
   if (!user) return null;
+  const visibleData =
+    data?.recordId === record.id && data?.userId === user.id ? data : null;
   return (
     <section
       aria-label="相关资料"
@@ -795,14 +1483,16 @@ export function TaskMaterials({ record, user, revision = 0, onAddNote }) {
         )}
       </div>
       {error && <p className="mt-2 text-xs text-rose-500">{error}</p>}
-      {data && !data.documents.length && !data.notes.length && (
-        <p className="mt-2 text-xs text-slate-400">
-          暂无关联的文件或随手记。上传资料时选择这个任务，或在随手记里关联它。
-        </p>
-      )}
-      {data?.documents.length > 0 && (
+      {visibleData &&
+        !visibleData.documents.length &&
+        !visibleData.notes.length && (
+          <p className="mt-2 text-xs text-slate-400">
+            暂无关联的文件或随手记。上传资料时选择这个任务，或在随手记里关联它。
+          </p>
+        )}
+      {visibleData?.documents.length > 0 && (
         <ul className="mt-2 space-y-1">
-          {data.documents.map((d) => (
+          {visibleData.documents.map((d) => (
             <li
               key={d.id}
               className="flex items-center justify-between gap-2 text-xs text-slate-500"
@@ -836,9 +1526,9 @@ export function TaskMaterials({ record, user, revision = 0, onAddNote }) {
           ))}
         </ul>
       )}
-      {data?.notes.length > 0 && (
+      {visibleData?.notes.length > 0 && (
         <ul className="mt-3 space-y-2">
-          {data.notes.map((n) => (
+          {visibleData.notes.map((n) => (
             <li key={n.id} className="rounded-xl bg-slate-50 px-3 py-2">
               <div className="flex items-center gap-2 text-[11px] text-slate-400">
                 <KindBadge kind={n.kind} />
@@ -848,7 +1538,13 @@ export function TaskMaterials({ record, user, revision = 0, onAddNote }) {
               <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-600">
                 {n.body}
               </p>
-              <NoteFiles files={n.files} />
+              <NoteFiles
+                files={n.files}
+                onUnauthorized={() => {
+                  setData(null);
+                  setError("登录已失效，请重新登录后查看相关资料。");
+                }}
+              />
             </li>
           ))}
         </ul>

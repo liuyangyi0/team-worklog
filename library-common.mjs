@@ -93,12 +93,58 @@ const eventKeys = new Set([
   "project_ids",
   "type",
   "application_id",
+  "occurred_on",
 ]);
+// Note history contains only record metadata or a single changed attachment.
+// Never enable object snapshots globally: vault entities carry secret payloads.
+const noteSnapshotText = {
+  id: 200,
+  project_id: 200,
+  kind: 40,
+  body: 4000,
+  occurred_on: 10,
+  people: 300,
+  deliverable_id: 200,
+  task_id: 200,
+  author_id: 200,
+  author_name: 100,
+  parent_note_id: 200,
+  thread_root_id: 200,
+  created: 40,
+  updated: 40,
+  document_id: 200,
+  title: 240,
+  current_version_id: 200,
+  version_id: 200,
+  link_version: 200,
+  filename: 1000,
+  reference_mode: 20,
+};
+function cleanNoteSnapshot(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result = {};
+  for (const [key, limit] of Object.entries(noteSnapshotText)) {
+    if (typeof value[key] === "string")
+      result[key] = value[key].slice(0, limit);
+    else if (value[key] === null) result[key] = null;
+  }
+  for (const key of ["version", "number", "size"])
+    if (Number.isSafeInteger(value[key]) && value[key] >= 0)
+      result[key] = value[key];
+    else if (value[key] === null) result[key] = null;
+  if (typeof value.deleted === "boolean") result.deleted = value.deleted;
+  return result;
+}
 function cleanDetails(details, entityType) {
   const result = {};
   if (!details || typeof details !== "object" || Array.isArray(details))
     return result;
   for (const [key, value] of Object.entries(details)) {
+    if (entityType === "note" && ["before", "after"].includes(key)) {
+      result[key] = cleanNoteSnapshot(value);
+      continue;
+    }
     if (!eventKeys.has(key)) continue;
     if (typeof value === "string")
       result[key] = value.slice(

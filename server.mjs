@@ -43,6 +43,7 @@ import { createNotes } from "./notes.mjs";
 import { createMilestones } from "./milestones.mjs";
 import { createChangeLedger } from "./change-ledger.mjs";
 import { createProjectOverview } from "./project-overview.mjs";
+import { createProjectArchive } from "./project-archive.mjs";
 import http from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -228,6 +229,7 @@ export async function createApp({
   const notes = createNotes({ db });
   const milestones = createMilestones({ db });
   const changes = createChangeLedger({ db });
+  const projectArchive = createProjectArchive({ db });
   const projectOverview = createProjectOverview({
     db,
     getMilestoneSummary: (projectId) => milestones.summary(projectId),
@@ -587,6 +589,7 @@ export async function createApp({
           milestones,
           changes,
           projectOverview,
+          projectArchive,
         ]) {
           const result = await service.api({
             route,

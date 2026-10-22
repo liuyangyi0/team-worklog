@@ -258,6 +258,7 @@ export function createMilestones({ db }) {
         details: {
           title: r.title,
           status: r.status,
+          occurred_on: r.actual_date || "",
           ...details,
           ...(chunk ? { fields: chunk } : {}),
         },

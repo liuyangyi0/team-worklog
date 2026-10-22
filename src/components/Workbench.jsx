@@ -59,6 +59,8 @@ export function Sidebar({
   onOverview,
   portfolioActive,
   onPortfolio,
+  archiveActive,
+  onArchive,
   onSettings,
   todoActive,
   todoCount = 0,
@@ -74,7 +76,11 @@ export function Sidebar({
     showArchived = archivedOpen || Boolean(project?.archived);
   function projectEntry(p) {
     const active =
-        !overview && !todoActive && !portfolioActive && p.id === project?.id,
+        !overview &&
+        !todoActive &&
+        !portfolioActive &&
+        !archiveActive &&
+        p.id === project?.id,
       c = colorOf(p.color);
     return (
       <div key={p.id} className="project-entry relative">
@@ -154,6 +160,19 @@ export function Sidebar({
         >
           <LayoutGrid className="h-4 w-4 shrink-0" />
           跨项目总览
+        </button>
+        <button
+          onClick={onArchive}
+          aria-current={archiveActive ? "page" : undefined}
+          className={
+            "mb-2 flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-[13px] transition-colors " +
+            (archiveActive
+              ? "bg-indigo-500/20 text-indigo-200 ring-1 ring-indigo-400/20"
+              : "text-slate-400 hover:bg-white/5 hover:text-slate-200")
+          }
+        >
+          <Search className="h-4 w-4 shrink-0" />
+          统一查档
         </button>
         <button
           onClick={onTodos}

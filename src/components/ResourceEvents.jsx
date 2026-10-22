@@ -37,6 +37,7 @@ const actions = {
   "apply-checklist": "套用资料清单",
   "attach-note": "添加附件",
   "detach-note": "移除附件",
+  "pin-note-file": "更正附件版本",
 };
 function describe(event) {
   if (actions[event.action]) return actions[event.action];
@@ -159,6 +160,35 @@ export default function ResourceEvents({ project, user, onLogin }) {
                           修改字段：{event.details.fields.join("、")}
                         </p>
                       )}
+                      {event.entity_type === "note" &&
+                        (event.details?.before || event.details?.after) && (
+                          <details className="mt-2 text-xs text-slate-500">
+                            <summary className="cursor-pointer">
+                              查看记录前后内容
+                            </summary>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                              {["before", "after"].map((k) => (
+                                <div
+                                  key={k}
+                                  className="min-w-0 rounded-lg bg-slate-50 p-3"
+                                >
+                                  <p className="mb-2 font-medium">
+                                    {k === "before" ? "修改前" : "修改后"}
+                                  </p>
+                                  <pre className="whitespace-pre-wrap break-all font-sans text-[11px]">
+                                    {event.details[k]
+                                      ? JSON.stringify(
+                                          event.details[k],
+                                          null,
+                                          2,
+                                        )
+                                      : "无"}
+                                  </pre>
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        )}
                       <time className="mt-2 block text-[11px] text-slate-400">
                         {new Date(event.created).toLocaleString("zh-CN", {
                           timeZone: "Asia/Shanghai",

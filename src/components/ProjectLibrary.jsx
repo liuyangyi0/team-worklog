@@ -84,31 +84,58 @@ export default function ProjectLibrary(props) {
     <LibrarySession key={props.project.id + ":" + props.user.id} {...props} />
   );
 }
-function LibrarySession({ project, user, records = [], revision = 0 }) {
+function LibrarySession({
+  project,
+  user,
+  records = [],
+  revision = 0,
+  initialDocumentId = "",
+  initialVersionId = "",
+  initialReleaseId = "",
+  onLookup,
+  onLogin,
+  onUnauthorized,
+}) {
   const [data, setData] = useState({ folders: [], documents: [] });
   const [folderId, setFolderId] = useState(null),
     [query, setQuery] = useState(""),
     [category, setCategory] = useState(""),
     [trash, setTrash] = useState(false);
+  const [revoked, setRevoked] = useState(false);
   const [error, setError] = useState(null),
     [loaded, setLoaded] = useState(false),
-    [modal, setModal] = useState(null),
+    [modal, setModal] = useState(
+      initialReleaseId ? { type: "releases", id: initialReleaseId } : null,
+    ),
     [selected, setSelected] = useState(() => {
       const params = new URLSearchParams(location.search);
-      return params.get("project") === project.id
-        ? params.get("document")
-        : null;
+      const fromUrl = params.get("document") || "";
+      return (
+        initialDocumentId ||
+        (params.get("project") === project.id && /^[\w-]{1,100}$/.test(fromUrl)
+          ? fromUrl
+          : null)
+      );
     }),
     [notice, setNotice] = useState("");
   const active = useRef(true),
     request = useRef(0);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    active.current = true;
+    return () => {
       active.current = false;
       request.current++;
-    },
-    [],
-  );
+    };
+  }, []);
+  function revoke() {
+    request.current++;
+    setRevoked(true);
+    setData({ folders: [], documents: [] });
+    setSelected(null);
+    setModal(null);
+    setQuery("");
+    onUnauthorized?.();
+  }
   async function load() {
     const token = ++request.current;
     try {
@@ -122,6 +149,7 @@ function LibrarySession({ project, user, records = [], revision = 0 }) {
       }
     } catch (e) {
       if (active.current && token === request.current) {
+        if (e.status === 401) revoke();
         setError(e);
         setLoaded(true);
       }
@@ -134,6 +162,7 @@ function LibrarySession({ project, user, records = [], revision = 0 }) {
   useEffect(() => {
     if (revision) load();
   }, [revision]);
+  if (revoked) return <InternalLogin onLogin={onLogin} />;
   const folders = data.folders || [],
     documents = data.documents || [];
   const selectedFolder = folders.find((f) => f.id === folderId);
@@ -169,6 +198,7 @@ function LibrarySession({ project, user, records = [], revision = 0 }) {
       await load();
       setNotice("已保存，操作已记录");
     } catch (e) {
+      if (e.status === 401) revoke();
       setError(e);
     }
   }
@@ -184,6 +214,12 @@ function LibrarySession({ project, user, records = [], revision = 0 }) {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {onLookup && (
+            <button className={secondary} onClick={onLookup}>
+              <Search size={15} />
+              统一查档
+            </button>
+          )}
           <button
             className={secondary}
             onClick={() => setModal({ type: "releases" })}
@@ -551,6 +587,8 @@ function LibrarySession({ project, user, records = [], revision = 0 }) {
         <ReleaseDialog
           projectId={project.id}
           documents={documents}
+          initialReleaseId={modal.id || ""}
+          onUnauthorized={revoke}
           onClose={() => setModal(null)}
         />
       )}
@@ -558,6 +596,10 @@ function LibrarySession({ project, user, records = [], revision = 0 }) {
         <DocumentDetail
           key={selected}
           id={selected}
+          initialVersionId={
+            selected === initialDocumentId ? initialVersionId : ""
+          }
+          onUnauthorized={revoke}
           projectId={project.id}
           user={user}
           folders={folders}
@@ -1030,6 +1072,8 @@ function UploadDialog({
 }
 function DocumentDetail({
   id,
+  initialVersionId = "",
+  onUnauthorized,
   projectId,
   user,
   folders,
@@ -1055,7 +1099,7 @@ function DocumentDetail({
   );
   async function load() {
     try {
-      const next = await api("/documents/" + id);
+      const next = await api("/documents/" + encodeURIComponent(id));
       if (active.current) {
         if (next.document.project_id !== projectId)
           throw new Error("该文档不属于当前项目，请返回对应项目查看");
@@ -1067,7 +1111,10 @@ function DocumentDetail({
         setError(null);
       }
     } catch (e) {
-      if (active.current) setError(e);
+      if (active.current) {
+        if (e.status === 401) onUnauthorized?.();
+        setError(e);
+      }
     }
   }
   useEffect(() => {
@@ -1081,7 +1128,10 @@ function DocumentDetail({
       await load();
       await onChanged();
     } catch (e) {
-      if (active.current) setError(e);
+      if (active.current) {
+        if (e.status === 401) onUnauthorized?.();
+        setError(e);
+      }
     } finally {
       if (active.current) setBusy(false);
     }
@@ -1089,6 +1139,10 @@ function DocumentDetail({
   async function download(version, isPreview = false) {
     setError(null);
     try {
+      // Native streamed downloads cannot report a 401 to this dialog.
+      const access = await api("/documents/" + encodeURIComponent(id));
+      if (access.document?.deleted || access.document?.sensitive)
+        throw new Error("资料已移除或不再提供下载，请刷新后查看");
       const result = await internalDownload(
         "/documents/" +
           id +
@@ -1104,13 +1158,19 @@ function DocumentDetail({
         setPreview(result);
       } else if (result?.url) URL.revokeObjectURL(result.url);
     } catch (e) {
-      if (active.current) setError(e);
+      if (active.current) {
+        if (e.status === 401) onUnauthorized?.();
+        setError(e);
+      }
     }
   }
   const doc = data?.document,
     versions = data?.versions || [],
     checkout = data?.checkout;
   const current = versions.find((v) => v.id === workingId(doc || {}));
+  const reference = initialVersionId
+    ? versions.find((v) => v.id === initialVersionId)
+    : null;
   return (
     <>
       <Modal
@@ -1164,6 +1224,42 @@ function DocumentDetail({
                   复制内部链接
                 </button>
               </div>
+              {initialVersionId && (
+                <div
+                  className="rounded-xl border border-indigo-100 bg-indigo-50 p-3"
+                  aria-label="查档定位版本"
+                >
+                  <p className="text-xs font-medium text-indigo-700">
+                    {reference
+                      ? "本次定位：V" +
+                        reference.number +
+                        " · " +
+                        reference.filename
+                      : "所引用版本不存在或不属于该文档"}
+                  </p>
+                  {reference && !(doc.deleted || doc.deleted_at) && (
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        className={smallButton}
+                        onClick={() => download(reference)}
+                      >
+                        <Download size={13} />
+                        下载此版本
+                      </button>
+                      {/\.(png|jpe?g|gif|webp|pdf)$/i.test(
+                        reference.filename || "",
+                      ) && (
+                        <button
+                          className={smallButton}
+                          onClick={() => download(reference, true)}
+                        >
+                          预览此版本
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="rounded-xl bg-slate-50 p-3">
                   <p className="text-xs text-slate-400">最新工作版</p>
@@ -1571,17 +1667,38 @@ function DocumentDetail({
     </>
   );
 }
-function ReleaseDialog({ projectId, documents, onClose }) {
+function ReleaseDialog({
+  projectId,
+  documents,
+  initialReleaseId = "",
+  onUnauthorized,
+  onClose,
+}) {
   const [releases, setReleases] = useState([]),
     [name, setName] = useState(""),
     [items, setItems] = useState({}),
     [error, setError] = useState(null),
     [busy, setBusy] = useState(false);
+  const active = useRef(true);
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
   async function load() {
     try {
       const r = await api("/projects/" + projectId + "/releases");
+      if (!active.current) return;
       setReleases(r.releases || []);
+      if (
+        initialReleaseId &&
+        !r.releases?.some((r) => r.id === initialReleaseId)
+      )
+        setError(new Error("所引用的交付归档不属于当前项目或已不可用"));
     } catch (e) {
+      if (!active.current) return;
+      if (e.status === 401) onUnauthorized?.();
       setError(e);
     }
   }
@@ -1603,9 +1720,10 @@ function ReleaseDialog({ projectId, documents, onClose }) {
       setItems({});
       await load();
     } catch (e) {
-      setError(e);
+      if (e.status === 401) onUnauthorized?.();
+      if (active.current) setError(e);
     } finally {
-      setBusy(false);
+      if (active.current) setBusy(false);
     }
   }
   return (
@@ -1693,7 +1811,15 @@ function ReleaseDialog({ projectId, documents, onClose }) {
           {releases.map((r) => (
             <div
               key={r.id}
-              className="mb-2 rounded-xl border border-slate-100 p-3"
+              aria-label={
+                r.id === initialReleaseId ? "查档定位归档" : undefined
+              }
+              className={
+                "mb-2 rounded-xl border p-3 " +
+                (r.id === initialReleaseId
+                  ? "border-indigo-200 bg-indigo-50/50"
+                  : "border-slate-100")
+              }
             >
               <div className="flex items-center justify-between gap-3">
                 <div>
@@ -1707,12 +1833,14 @@ function ReleaseDialog({ projectId, documents, onClose }) {
                   className={secondary}
                   onClick={async () => {
                     try {
+                      await api("/projects/" + projectId + "/releases");
                       await internalDownload(
                         "/releases/" + r.id + "/download",
                         r.name + ".zip",
                       );
                     } catch (e) {
-                      setError(e);
+                      if (e.status === 401) onUnauthorized?.();
+                      if (active.current) setError(e);
                     }
                   }}
                 >

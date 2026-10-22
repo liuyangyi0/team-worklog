@@ -2,6 +2,7 @@ import MyTodos from "./components/MyTodos.jsx";
 import ProjectOverview from "./components/ProjectOverview.jsx";
 import ProjectMilestones from "./components/ProjectMilestones.jsx";
 import ChangeLedger from "./components/ChangeLedger.jsx";
+import ProjectArchive from "./components/ProjectArchive.jsx";
 import Notifications from "./components/Notifications.jsx";
 import TaskDetail from "./components/TaskDetail.jsx";
 import PeopleOverview from "./components/PeopleOverview.jsx";
@@ -72,6 +73,10 @@ function listPreference(key, allowed, fallback) {
     return fallback;
   }
 }
+function queryEntity(key) {
+  const value = new URLSearchParams(location.search).get(key) || "";
+  return /^[\w-]{1,100}$/.test(value) ? value : "";
+}
 export default function App() {
   const { state, loaded, error, refresh } = useWorkbench();
   const [projectId, setProjectId] = useState(
@@ -89,12 +94,24 @@ export default function App() {
     [portfolioView, setPortfolioView] = useState(
       () => new URLSearchParams(location.search).get("view") === "projects",
     ),
-    [milestoneId, setMilestoneId] = useState(
-      () => new URLSearchParams(location.search).get("milestone") || "",
+    [archiveView, setArchiveView] = useState(
+      () => new URLSearchParams(location.search).get("view") === "archive",
     ),
-    [changeId, setChangeId] = useState(
-      () => new URLSearchParams(location.search).get("change") || "",
+    [archiveMode, setArchiveMode] = useState(() =>
+      new URLSearchParams(location.search).get("archive_mode") === "search"
+        ? "search"
+        : "timeline",
     ),
+    [noteId, setNoteId] = useState(() => queryEntity("note")),
+    [documentTarget, setDocumentTarget] = useState(() => {
+      return {
+        id: queryEntity("document"),
+        versionId: queryEntity("version"),
+        releaseId: queryEntity("release"),
+      };
+    }),
+    [milestoneId, setMilestoneId] = useState(() => queryEntity("milestone")),
+    [changeId, setChangeId] = useState(() => queryEntity("change")),
     [todosView, setTodosView] = useState(false),
     [notificationsOpen, setNotificationsOpen] = useState(false),
     [detailId, setDetailId] = useState(""),
@@ -118,6 +135,7 @@ export default function App() {
         "resource-events",
         "milestones",
         "changes",
+        "archive",
       ].includes(value)
         ? value
         : "records";
@@ -270,6 +288,11 @@ export default function App() {
     setOverview(false);
     setTodosView(false);
     setPortfolioView(false);
+    setArchiveView(false);
+    setArchiveMode("timeline");
+    setNoteId("");
+    setDocumentTarget({ id: "", versionId: "", releaseId: "" });
+    setNoteDraft(null);
     setMilestoneId("");
     setChangeId("");
     setProjectId(p.id);
@@ -283,6 +306,10 @@ export default function App() {
       "configuration",
       "milestone",
       "change",
+      "note",
+      "version",
+      "release",
+      "archive_mode",
       "view",
     ])
       u.searchParams.delete(key);
@@ -293,11 +320,68 @@ export default function App() {
     setProjectModule(module);
     setMilestoneId(detail.milestone || "");
     setChangeId(detail.change || "");
+    setNoteId(detail.note || "");
+    setArchiveMode(detail.archive_mode === "search" ? "search" : "timeline");
+    setDocumentTarget({
+      id: detail.document || "",
+      versionId: detail.version || "",
+      releaseId: detail.release || "",
+    });
     const next = new URL(location.href);
     next.searchParams.set("module", module);
     if (detail.milestone) next.searchParams.set("milestone", detail.milestone);
     if (detail.change) next.searchParams.set("change", detail.change);
+    for (const key of [
+      "note",
+      "document",
+      "version",
+      "release",
+      "archive_mode",
+    ])
+      if (detail[key]) next.searchParams.set(key, detail[key]);
     history.replaceState(null, "", next);
+  }
+  function clearOriginTargets(url) {
+    setNoteId("");
+    setMilestoneId("");
+    setChangeId("");
+    setDocumentTarget({ id: "", versionId: "", releaseId: "" });
+    if (url)
+      for (const key of [
+        "note",
+        "document",
+        "version",
+        "release",
+        "milestone",
+        "change",
+        "credential",
+        "configuration",
+      ])
+        url.searchParams.delete(key);
+  }
+  function internalSessionExpired() {
+    setNoteDraft(null);
+    refresh(true).catch(() => {});
+  }
+  function openArchiveItem(item) {
+    act(async () => {
+      const latest = await refresh(true);
+      const p = latest.projects.find((p) => p.id === item.project_id);
+      if (!p) return notify("项目已不存在，请刷新查档结果");
+      if (item.source_type === "note")
+        navigateProject(p, "notes", { note: item.entity_id });
+      else if (item.source_type === "milestone")
+        navigateProject(p, "milestones", { milestone: item.entity_id });
+      else if (item.source_type === "change")
+        navigateProject(p, "changes", { change: item.entity_id });
+      else if (item.source_type === "document")
+        navigateProject(p, "documents", {
+          document: item.entity_id,
+          version: item.version_id,
+        });
+      else if (item.source_type === "delivery")
+        navigateProject(p, "documents", { release: item.entity_id });
+    });
   }
   function openManagementTask(task) {
     const id = typeof task === "string" ? task : task.id;
@@ -452,13 +536,41 @@ export default function App() {
         projects={projects}
         project={project}
         user={user}
+        archiveActive={archiveView}
+        onArchive={() => {
+          setArchiveView(true);
+          setArchiveMode("search");
+          setPortfolioView(false);
+          setTodosView(false);
+          setOverview(false);
+          setCapture(false);
+          setNoteDraft(null);
+          const next = new URL(location.href);
+          clearOriginTargets(next);
+          next.searchParams.set("view", "archive");
+          next.searchParams.set("archive_mode", "search");
+          for (const key of [
+            "note",
+            "document",
+            "version",
+            "release",
+            "milestone",
+            "change",
+            "credential",
+            "configuration",
+          ])
+            next.searchParams.delete(key);
+          history.replaceState(null, "", next);
+        }}
         portfolioActive={portfolioView}
         onPortfolio={() => {
           setPortfolioView(true);
+          setArchiveView(false);
           setTodosView(false);
           setOverview(false);
           setCapture(false);
           const next = new URL(location.href);
+          clearOriginTargets(next);
           next.searchParams.set("view", "projects");
           for (const key of [
             "document",
@@ -466,6 +578,10 @@ export default function App() {
             "configuration",
             "milestone",
             "change",
+            "note",
+            "version",
+            "release",
+            "archive_mode",
           ])
             next.searchParams.delete(key);
           history.replaceState(null, "", next);
@@ -478,7 +594,9 @@ export default function App() {
           setTodosView(true);
           setOverview(false);
           setPortfolioView(false);
+          setArchiveView(false);
           const next = new URL(location.href);
+          clearOriginTargets(next);
           next.searchParams.delete("view");
           history.replaceState(null, "", next);
           setCapture(false);
@@ -489,7 +607,9 @@ export default function App() {
           setOverview(true);
           setTodosView(false);
           setPortfolioView(false);
+          setArchiveView(false);
           const next = new URL(location.href);
+          clearOriginTargets(next);
           next.searchParams.delete("view");
           history.replaceState(null, "", next);
           setCapture(false);
@@ -498,7 +618,9 @@ export default function App() {
         onSelect={choose}
         onNew={() => {
           setPortfolioView(false);
+          setArchiveView(false);
           const next = new URL(location.href);
+          clearOriginTargets(next);
           next.searchParams.delete("view");
           history.replaceState(null, "", next);
           requireUser({ type: "project" });
@@ -514,7 +636,18 @@ export default function App() {
         }
       />
       <main className="workbench-main flex min-w-0 flex-1 flex-col overflow-y-auto">
-        {portfolioView ? (
+        {archiveView ? (
+          <div className="mx-auto w-full max-w-5xl px-8 pb-12 pt-8">
+            <ProjectArchive
+              key={"global:" + (user?.id || "guest") + ":" + authEpoch}
+              user={user}
+              project={null}
+              initialMode="search"
+              onLogin={() => setModal({ type: "auth" })}
+              onOpenItem={openArchiveItem}
+            />
+          </div>
+        ) : portfolioView ? (
           <ProjectOverview
             key={(user?.id || "guest") + ":" + authEpoch}
             user={user}
@@ -581,6 +714,7 @@ export default function App() {
                   ["milestones", "项目里程碑"],
                   ["changes", "需求变更"],
                   ["notes", "随手记"],
+                  ["archive", "项目大事记"],
                   ["documents", "项目资料"],
                   ["resources", "资源与配置"],
                   ["resource-events", "资料日志"],
@@ -599,6 +733,13 @@ export default function App() {
                       setProjectModule(id);
                       setMilestoneId("");
                       setChangeId("");
+                      setNoteId("");
+                      setDocumentTarget({
+                        id: "",
+                        versionId: "",
+                        releaseId: "",
+                      });
+                      setArchiveMode("timeline");
                       setCapture(false);
                       const next = new URL(location.href);
                       next.searchParams.set("module", id);
@@ -608,6 +749,10 @@ export default function App() {
                         "configuration",
                         "milestone",
                         "change",
+                        "note",
+                        "version",
+                        "release",
+                        "archive_mode",
                         "view",
                       ])
                         next.searchParams.delete(key);
@@ -661,7 +806,26 @@ export default function App() {
                   )}
                 </div>
               ) : null}
-              {projectModule === "milestones" ? (
+              {projectModule === "archive" ? (
+                <div className="pt-8">
+                  <ProjectArchive
+                    key={
+                      (project?.id || "") +
+                      ":" +
+                      (user?.id || "guest") +
+                      ":" +
+                      authEpoch +
+                      ":" +
+                      archiveMode
+                    }
+                    project={project}
+                    user={user}
+                    initialMode={archiveMode}
+                    onLogin={() => setModal({ type: "auth" })}
+                    onOpenItem={openArchiveItem}
+                  />
+                </div>
+              ) : projectModule === "milestones" ? (
                 <ProjectMilestones
                   key={
                     (project?.id || "") +
@@ -698,13 +862,28 @@ export default function App() {
               ) : projectModule === "notes" ? (
                 <SiteLog
                   key={
-                    "notes:" + (project?.id || "") + ":" + (user?.id || "guest")
+                    "notes:" +
+                    (project?.id || "") +
+                    ":" +
+                    (user?.id || "guest") +
+                    ":" +
+                    authEpoch
                   }
                   project={project}
                   user={user}
                   revision={notesRevision}
                   onLogin={() => setModal({ type: "auth" })}
-                  onCreate={() => setNoteDraft({ projectId: project.id })}
+                  initialNoteId={noteId}
+                  onUnauthorized={internalSessionExpired}
+                  onOpenDocument={(id, version) =>
+                    navigateProject(project, "documents", {
+                      document: id,
+                      version,
+                    })
+                  }
+                  onCreate={(draft = {}) =>
+                    setNoteDraft({ projectId: project.id, draft })
+                  }
                   onEdit={(note) =>
                     setNoteDraft({ projectId: project.id, note })
                   }
@@ -734,11 +913,32 @@ export default function App() {
                     }
                   />
                   <ProjectLibrary
-                    key={(project?.id || "") + ":" + (user?.id || "guest")}
+                    key={
+                      (project?.id || "") +
+                      ":" +
+                      (user?.id || "guest") +
+                      ":" +
+                      authEpoch +
+                      ":" +
+                      documentTarget.id +
+                      ":" +
+                      documentTarget.versionId +
+                      ":" +
+                      documentTarget.releaseId
+                    }
                     project={project}
                     user={user}
                     records={projectRecords}
                     members={people}
+                    initialDocumentId={documentTarget.id}
+                    initialVersionId={documentTarget.versionId}
+                    initialReleaseId={documentTarget.releaseId}
+                    onLookup={() =>
+                      navigateProject(project, "archive", {
+                        archive_mode: "search",
+                      })
+                    }
+                    onUnauthorized={internalSessionExpired}
                     revision={libraryRevision}
                     onLogin={() => setModal({ type: "auth" })}
                   />
@@ -1190,7 +1390,15 @@ export default function App() {
         user &&
         projects.find((p) => p.id === noteDraft.projectId) && (
           <NoteDialog
-            key={noteDraft.note?.id || "new"}
+            key={
+              (user?.id || "guest") +
+              ":" +
+              authEpoch +
+              ":" +
+              noteDraft.projectId +
+              ":" +
+              (noteDraft.note?.id || noteDraft.draft?.parent_note_id || "new")
+            }
             project={projects.find((p) => p.id === noteDraft.projectId)}
             user={user}
             records={records}
@@ -1207,6 +1415,7 @@ export default function App() {
             note={noteDraft.note}
             draft={noteDraft.draft}
             onClose={() => setNoteDraft(null)}
+            onUnauthorized={internalSessionExpired}
             onSaved={async (_note, { keepOpen } = {}) => {
               setNotesRevision((n) => n + 1);
               materialsChanged();
@@ -1230,6 +1439,10 @@ export default function App() {
                 setTodosView(true);
                 setOverview(false);
                 setPortfolioView(false);
+                setArchiveView(false);
+                const u = new URL(location.href);
+                u.searchParams.delete("view");
+                history.replaceState(null, "", u);
                 setCapture(false);
                 setModal(null);
               } else setModal(next || null);
