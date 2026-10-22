@@ -36,6 +36,32 @@ import {
 } from "./UI.jsx";
 
 export const ATTACHMENT_FOLDER = "随手记附件";
+function newNoteRequestId() {
+  if (typeof globalThis.crypto.randomUUID === "function")
+    return globalThis.crypto.randomUUID();
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = Array.from(bytes, (value) =>
+    value.toString(16).padStart(2, "0"),
+  ).join("");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join("-");
+}
+function createPayloadSignature(payload) {
+  const { client_request_id: _requestId, ...fields } = payload;
+  const attachments = [...(fields.attachments || [])].sort((a, b) =>
+    (a.document_id + ":" + a.version_id).localeCompare(
+      b.document_id + ":" + b.version_id,
+    ),
+  );
+  return JSON.stringify({ ...fields, attachments });
+}
 const kindClasses = {
   site: "bg-violet-50 text-violet-600 ring-violet-100",
   verbal: "bg-amber-50 text-amber-700 ring-amber-100",
@@ -361,7 +387,12 @@ export function NoteComposer({
   const live = useRef(true),
     saving = useRef(false),
     uploaded = useRef(new Map()),
+    uploadPlans = useRef(new Map()),
+    createRequestId = useRef(null),
+    createRequest = useRef(null),
+    createPendingFiles = useRef([]),
     controller = useRef(null);
+  if (!createRequestId.current) createRequestId.current = newNoteRequestId();
   function unauthorized(e) {
     if (e?.status !== 401) return false;
     setDenied(true);
@@ -373,6 +404,9 @@ export function NoteComposer({
     setChannel("");
     setPending([]);
     uploaded.current.clear();
+    uploadPlans.current.clear();
+    createRequest.current = null;
+    createPendingFiles.current = [];
     setDeliverables([]);
     setDeliverableId("");
     setTaskId("");
@@ -434,7 +468,7 @@ export function NoteComposer({
   }
   async function submit(e) {
     e.preventDefault();
-    if (saving.current || denied) return;
+    if (saving.current || denied || note?.deleted) return;
     saving.current = true;
     setBusy(true);
     setError("");
@@ -459,17 +493,73 @@ export function NoteComposer({
         exchange_time: kind === "file" ? exchangeTime : "",
         channel: kind === "file" ? channel : "",
       };
-      saved = (
-        await (saved
-          ? api("/notes/" + saved.id, "PATCH", {
-              ...fields,
-              version: saved.version,
-            })
-          : api("/projects/" + project.id + "/notes", "POST", {
-              ...fields,
-              parent_note_id: draft.parent_note_id || null,
-            }))
-      ).note;
+      if (saved) {
+        saved = (
+          await api("/notes/" + saved.id, "PATCH", {
+            ...fields,
+            version: saved.version,
+          })
+        ).note;
+      } else {
+        const desired = {
+          ...fields,
+          parent_note_id: draft.parent_note_id || null,
+          client_request_id: createRequestId.current,
+        };
+        if (!createRequest.current) {
+          createRequest.current = desired;
+          createPendingFiles.current = [...pending];
+        }
+        const original = createRequest.current;
+        const result = await api(
+          "/projects/" + project.id + "/notes",
+          "POST",
+          original,
+        );
+        if (!live.current) return;
+        const creationVersion = result.creation_version ?? result.note.version;
+        saved = {
+          ...result.note,
+          version: result.replayed ? creationVersion : result.note.version,
+        };
+        setNote(saved);
+        createRequest.current = null;
+        const sameLink = (choice) =>
+          (saved.files || []).some(
+            (f) =>
+              f.document_id === choice.document_id &&
+              f.version_id === choice.version_id,
+          );
+        const pendingChanged =
+          pending.length !== createPendingFiles.current.length ||
+          pending.some(
+            (file, index) => file !== createPendingFiles.current[index],
+          );
+        const draftChanged =
+          createPayloadSignature(desired) !==
+            createPayloadSignature(original) || pendingChanged;
+        const linksChanged = attachments.some((choice) => !sameLink(choice));
+        if (
+          saved.deleted ||
+          draftChanged ||
+          linksChanged ||
+          (result.replayed && result.note.version !== creationVersion)
+        ) {
+          setExistingFiles((old) => old.filter((choice) => !sameLink(choice)));
+          if (selected && sameLink(selected)) {
+            setDocumentId("");
+            setDocumentVersions([]);
+            setDocumentVersionId("");
+          }
+          setError(
+            saved.deleted
+              ? "上次新建已保存，但该记录现已被删除，不能继续保存或上传。请核对后关闭。"
+              : "上次新建已保存，已恢复原记录。当前草稿或记录已有变化，请核对后再点保存；附件版本如有不同，请取消待关联选择或手动更正。",
+          );
+          await publishSaved(saved, { keepOpen: true });
+          return;
+        }
+      }
       if (!live.current) return;
       setNote(saved);
       setExistingFiles([]);
@@ -484,33 +574,69 @@ export function NoteComposer({
           try {
             let result = uploaded.current.get(file);
             if (!result) {
-              result = await uploadFile(
-                file,
-                {
-                  title: file.name,
-                  folder_id: folder,
-                  category: ATTACHMENT_FOLDER,
-                  description: body.trim().slice(0, 200),
-                  task_id: taskId || null,
-                  tags: [noteKind(kind).label],
-                },
-                {
+              let plan = uploadPlans.current.get(file);
+              if (!plan) {
+                plan = {
+                  metadata: {
+                    title: file.name,
+                    folder_id: folder,
+                    category: ATTACHMENT_FOLDER,
+                    description: body.trim().slice(0, 200),
+                    task_id: taskId || null,
+                    tags: [noteKind(kind).label],
+                  },
+                  clientId: newNoteRequestId(),
                   userId: user.id,
                   projectId: project.id,
-                  signal: controller.current?.signal,
-                  onProgress: ({ loaded, total }) =>
-                    live.current &&
-                    setProgress(
-                      "附件 " +
-                        (index + 1) +
-                        "/" +
-                        pending.length +
-                        " · " +
-                        Math.round((loaded / Math.max(total, 1)) * 100) +
-                        "%",
-                    ),
-                },
-              );
+                };
+                uploadPlans.current.set(file, plan);
+              }
+              for (let renewal = 0; ; renewal++) {
+                try {
+                  result = await uploadFile(file, plan.metadata, {
+                    clientId: plan.clientId,
+                    userId: plan.userId,
+                    projectId: plan.projectId,
+                    signal: controller.current?.signal,
+                    onProgress: ({ uploadId, loaded, total }) => {
+                      if (uploadId) plan.uploadId = uploadId;
+                      if (live.current)
+                        setProgress(
+                          "附件 " +
+                            (index + 1) +
+                            "/" +
+                            pending.length +
+                            " · " +
+                            Math.round((loaded / Math.max(total, 1)) * 100) +
+                            "%",
+                        );
+                    },
+                  });
+                  break;
+                } catch (uploadError) {
+                  if (!live.current) return;
+                  if (
+                    renewal >= 1 ||
+                    ![409, 410].includes(uploadError.status) ||
+                    !plan.uploadId
+                  )
+                    throw uploadError;
+                  const session = await api("/uploads/" + plan.uploadId);
+                  if (!live.current) return;
+                  if (session.status === "complete" && session.result) {
+                    result = session.result;
+                    break;
+                  }
+                  if (!["expired", "cancelled"].includes(session.status))
+                    throw uploadError;
+                  plan = {
+                    ...plan,
+                    clientId: newNoteRequestId(),
+                    uploadId: null,
+                  };
+                  uploadPlans.current.set(file, plan);
+                }
+              }
               if (!live.current) return;
               uploaded.current.set(file, result);
             }
@@ -526,8 +652,17 @@ export function NoteComposer({
             if (!live.current) return;
             setNote(saved);
             uploaded.current.delete(file);
+            uploadPlans.current.delete(file);
           } catch (uploadError) {
             if (!live.current || unauthorized(uploadError)) return;
+            // Definite validation failures can retry with corrected metadata;
+            // unknown results retain the first plan to recover completed uploads.
+            if (
+              !uploaded.current.has(file) &&
+              uploadError.status >= 400 &&
+              uploadError.status < 500
+            )
+              uploadPlans.current.delete(file);
             failed.push({ file, message: uploadError.message });
           }
         }
@@ -544,6 +679,13 @@ export function NoteComposer({
       }
       await publishSaved(saved);
     } catch (e) {
+      if (
+        !saved &&
+        (e.status === 400 || e.code === "NOTE_CREATE_NOT_COMMITTED")
+      ) {
+        createRequest.current = null;
+        createPendingFiles.current = [];
+      }
       if (live.current && !unauthorized(e)) setError(e);
     } finally {
       saving.current = false;
@@ -681,7 +823,10 @@ export function NoteComposer({
       onClose={() => !busy && onClose()}
     >
       <form onSubmit={submit}>
-        <fieldset disabled={busy} className="min-w-0 space-y-5 px-6 pb-2">
+        <fieldset
+          disabled={busy || note?.deleted}
+          className="min-w-0 space-y-5 px-6 pb-2"
+        >
           <fieldset>
             <legend className="mb-2 text-[13px] font-medium text-slate-600">
               类型
@@ -1043,7 +1188,10 @@ export function NoteComposer({
           <button
             type="submit"
             disabled={
-              busy || !body.trim() || (!!documentId && !documentVersionId)
+              busy ||
+              note?.deleted ||
+              !body.trim() ||
+              (!!documentId && !documentVersionId)
             }
             className={primary}
           >
@@ -1713,28 +1861,65 @@ export default function SiteLog({
 export function TaskMaterials({ record, user, revision = 0, onAddNote }) {
   const [data, setData] = useState(null),
     [error, setError] = useState("");
+  const generation = useRef(0);
   useEffect(() => {
+    const serial = ++generation.current;
     setData(null);
     setError("");
     if (!user) return;
-    let live = true;
     api("/records/" + record.id + "/materials")
       .then(
         (r) =>
-          live &&
+          serial === generation.current &&
           (setData({ ...r, recordId: record.id, userId: user.id }),
           setError("")),
       )
       .catch((e) => {
-        if (live) {
-          setData(null);
-          setError(e.message);
+        if (serial === generation.current) {
+          if (e.status === 401) expireMaterials();
+          else {
+            setData(null);
+            setError(e.message);
+          }
         }
       });
     return () => {
-      live = false;
+      generation.current++;
     };
   }, [record.id, user?.id, revision]);
+  function expireMaterials() {
+    generation.current++;
+    setData(null);
+    setError("登录已失效，请重新登录后查看相关资料。");
+  }
+  async function downloadMaterial(document) {
+    const serial = generation.current;
+    setError("");
+    try {
+      const result = await api("/documents/" + document.id);
+      if (serial !== generation.current) return;
+      const fresh = result.document;
+      if (
+        fresh?.project_id !== record.project_id ||
+        fresh.deleted ||
+        fresh.sensitive
+      )
+        throw new Error("资料已删除或受限，无法下载");
+      if (!fresh.current_version_id) throw new Error("资料暂无可下载版本");
+      await internalDownload(
+        "/documents/" +
+          fresh.id +
+          "/versions/" +
+          fresh.current_version_id +
+          "/download",
+        fresh.filename || fresh.title,
+      );
+    } catch (e) {
+      if (serial !== generation.current) return;
+      if (e.status === 401) expireMaterials();
+      else setError(e.message);
+    }
+  }
   if (!user) return null;
   const visibleData =
     data?.recordId === record.id && data?.userId === user.id ? data : null;
@@ -1781,16 +1966,7 @@ export function TaskMaterials({ record, user, revision = 0, onAddNote }) {
                 <button
                   aria-label={"下载：" + d.title}
                   className="shrink-0 rounded p-1 hover:text-indigo-600"
-                  onClick={() =>
-                    internalDownload(
-                      "/documents/" +
-                        d.id +
-                        "/versions/" +
-                        d.current_version_id +
-                        "/download",
-                      d.filename || d.title,
-                    )
-                  }
+                  onClick={() => downloadMaterial(d)}
                 >
                   <Download className="h-3.5 w-3.5" />
                 </button>
@@ -1816,13 +1992,7 @@ export function TaskMaterials({ record, user, revision = 0, onAddNote }) {
                 {n.body}
               </p>
               <NoteExchange note={n} />
-              <NoteFiles
-                files={n.files}
-                onUnauthorized={() => {
-                  setData(null);
-                  setError("登录已失效，请重新登录后查看相关资料。");
-                }}
-              />
+              <NoteFiles files={n.files} onUnauthorized={expireMaterials} />
             </li>
           ))}
         </ul>

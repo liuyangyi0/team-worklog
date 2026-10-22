@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   libraryFail as fail,
   libraryTx as tx,
@@ -48,6 +48,7 @@ export function installNotesSchema(db) {
   // A migration token protects later corrections without inventing a historical version.
   db.exec(`UPDATE project_note_files SET link_version=lower(hex(randomblob(16))) WHERE link_version IS NULL;
     CREATE INDEX IF NOT EXISTS project_notes_parent ON project_notes(parent_note_id,deleted);
+    CREATE TABLE IF NOT EXISTS project_note_create_requests(actor_id TEXT NOT NULL REFERENCES users(id),project_id TEXT NOT NULL REFERENCES projects(id),client_request_id TEXT NOT NULL,request_hash TEXT NOT NULL,note_id TEXT NOT NULL REFERENCES project_notes(id),creation_version INTEGER NOT NULL,created TEXT NOT NULL,PRIMARY KEY(actor_id,project_id,client_request_id));
     CREATE TRIGGER IF NOT EXISTS project_notes_parent_immutable BEFORE UPDATE OF parent_note_id ON project_notes
       WHEN NEW.parent_note_id IS NOT OLD.parent_note_id BEGIN SELECT RAISE(ABORT,'Note parent is immutable'); END;`);
 }
@@ -263,6 +264,48 @@ export function createNotes({ db }) {
       return { document_id: choice.document_id, version_id: choice.version_id };
     });
   }
+  function createRequestId(value) {
+    if (value === undefined) return null;
+    if (
+      typeof value !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        value,
+      )
+    )
+      fail(400, "新建请求编号必须是 UUID");
+    return value.toLowerCase();
+  }
+  function createRequestHash(b, choices) {
+    const pick = (key, fallback) => (b[key] === undefined ? fallback : b[key]);
+    const trim = (value) => (typeof value === "string" ? value.trim() : value);
+    // Store only a digest of accepted intent keys. Live relationships must not be
+    // resolved here: a committed retry still works after an attachment or parent is deleted.
+    const intent = {
+      kind: pick("kind", "other"),
+      body: trim(pick("body", "")),
+      occurred_on: pick("occurred_on", ""),
+      people:
+        typeof b.people === "string"
+          ? splitNames(b.people).join("、")
+          : pick("people", ""),
+      deliverable_id: pick("deliverable_id", null) || null,
+      task_id: pick("task_id", null) || null,
+      parent_note_id: pick("parent_note_id", null),
+      file_direction: pick("file_direction", ""),
+      counterparty: trim(pick("counterparty", "")),
+      exchange_time: pick("exchange_time", ""),
+      channel: trim(pick("channel", "")),
+      thread_root_id_present: b.thread_root_id !== undefined,
+      attachments: [...choices].sort((a, z) =>
+        a.document_id < z.document_id
+          ? -1
+          : a.document_id > z.document_id
+            ? 1
+            : 0,
+      ),
+    };
+    return createHash("sha256").update(JSON.stringify(intent)).digest("hex");
+  }
   // Called inside the note transaction: every chosen version and audit must succeed.
   function attachChoices(user, n, choices) {
     const prepared = choices.map((choice) => {
@@ -379,55 +422,114 @@ export function createNotes({ db }) {
     }
     if (list && method === "POST") {
       const projectId = project(list[1]);
-      const f = fields(b, projectId);
-      const choices = attachmentChoices(b.attachments);
-      let parentId = b.parent_note_id === undefined ? null : b.parent_note_id;
-      if (parentId !== null) {
-        const parent =
-          typeof parentId === "string" &&
-          get(
-            "SELECT * FROM project_notes WHERE id=? AND project_id=? AND deleted=0",
-            parentId,
+      let clientRequestId = null;
+      try {
+        clientRequestId = createRequestId(b.client_request_id);
+        const choices = attachmentChoices(b.attachments);
+        const requestHash = clientRequestId
+          ? createRequestHash(b, choices)
+          : null;
+        let id,
+          replayed = false,
+          creationVersion = 1;
+        tx(db, () => {
+          const previous =
+            clientRequestId &&
+            get(
+              "SELECT note_id,request_hash,creation_version FROM project_note_create_requests WHERE actor_id=? AND project_id=? AND client_request_id=?",
+              user.id,
+              projectId,
+              clientRequestId,
+            );
+          if (previous) {
+            if (previous.request_hash !== requestHash)
+              fail(409, "此新建请求已保存其他内容，请先恢复原请求并核对记录");
+            id = previous.note_id;
+            creationVersion = previous.creation_version;
+            replayed = true;
+            return;
+          }
+          const f = fields(b, projectId);
+          let parentId =
+            b.parent_note_id === undefined ? null : b.parent_note_id;
+          if (parentId !== null) {
+            const parent =
+              typeof parentId === "string" &&
+              get(
+                "SELECT * FROM project_notes WHERE id=? AND project_id=? AND deleted=0",
+                parentId,
+                projectId,
+              );
+            if (!parent) fail(400, "补充的原记录无效或已删除");
+            const root = note(rootId(parent), true);
+            if (root.project_id !== projectId || root.parent_note_id)
+              fail(400, "原记录的事项关系无效");
+            parentId = root.id;
+          }
+          if (b.thread_root_id !== undefined) fail(400, "事项根记录由系统确定");
+          id = randomUUID();
+          const created = now();
+          run(
+            "INSERT INTO project_notes(id,project_id,kind,body,occurred_on,people,deliverable_id,task_id,author_id,author_name,created,updated,parent_note_id,file_direction,counterparty,exchange_time,channel) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            id,
             projectId,
+            f.kind,
+            f.body,
+            f.occurred_on,
+            f.people,
+            f.deliverable_id,
+            f.task_id,
+            user.id,
+            user.name,
+            created,
+            created,
+            parentId,
+            f.file_direction,
+            f.counterparty,
+            f.exchange_time,
+            f.channel,
           );
-        if (!parent) fail(400, "补充的原记录无效或已删除");
-        const root = note(rootId(parent), true);
-        if (root.project_id !== projectId || root.parent_note_id)
-          fail(400, "原记录的事项关系无效");
-        parentId = root.id;
-      }
-      if (b.thread_root_id !== undefined) fail(400, "事项根记录由系统确定");
-      const id = randomUUID(),
-        created = now();
-      tx(db, () => {
-        run(
-          "INSERT INTO project_notes(id,project_id,kind,body,occurred_on,people,deliverable_id,task_id,author_id,author_name,created,updated,parent_note_id,file_direction,counterparty,exchange_time,channel) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-          id,
-          projectId,
-          f.kind,
-          f.body,
-          f.occurred_on,
-          f.people,
-          f.deliverable_id,
-          f.task_id,
-          user.id,
-          user.name,
-          created,
-          created,
-          parentId,
-          f.file_direction,
-          f.counterparty,
-          f.exchange_time,
-          f.channel,
-        );
-        const saved = note(id);
-        event(user, "create-note", saved, {
-          before: null,
-          after: snapshot(saved),
+          const saved = note(id);
+          event(user, "create-note", saved, {
+            before: null,
+            after: snapshot(saved),
+          });
+          attachChoices(user, saved, choices);
+          if (clientRequestId)
+            run(
+              "INSERT INTO project_note_create_requests(actor_id,project_id,client_request_id,request_hash,note_id,creation_version,created) VALUES(?,?,?,?,?,?,?)",
+              user.id,
+              projectId,
+              clientRequestId,
+              requestHash,
+              id,
+              saved.version,
+              created,
+            );
         });
-        attachChoices(user, saved, choices);
-      });
-      return { status: 201, data: { note: present(note(id)) } };
+        return {
+          status: 201,
+          data: {
+            note: present(note(id, true)),
+            replayed,
+            creation_version: creationVersion,
+          },
+        };
+      } catch (error) {
+        if (
+          error.status >= 400 &&
+          error.status < 500 &&
+          (!clientRequestId ||
+            !get(
+              "SELECT 1 FROM project_note_create_requests WHERE actor_id=? AND project_id=? AND client_request_id=?",
+              user.id,
+              projectId,
+              clientRequestId,
+            ))
+        )
+          error.code = "NOTE_CREATE_NOT_COMMITTED";
+        throw error;
+      }
     }
     if (!item) fail(405, "不支持的随手记操作");
     const n = note(item[1], true);

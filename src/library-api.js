@@ -94,7 +94,7 @@ const pause = (ms, signal) =>
 export async function uploadFile(
   file,
   metadata,
-  { userId, projectId, signal, onProgress = () => {} } = {},
+  { userId, projectId, signal, clientId, onProgress = () => {} } = {},
 ) {
   const key = resumeKey(userId, projectId, file);
   let session;
@@ -115,6 +115,7 @@ export async function uploadFile(
     session = await api("/uploads", "POST", {
       project_id: projectId,
       ...metadata,
+      ...(clientId ? { client_id: clientId } : {}),
       filename: file.name,
       size: file.size,
       relative_path: file.webkitRelativePath || undefined,

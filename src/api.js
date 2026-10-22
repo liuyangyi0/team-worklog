@@ -34,6 +34,9 @@ export async function api(route, method = "GET", data) {
   if (!response.ok)
     throw Object.assign(new Error(result.error || "请求失败"), {
       status: response.status,
+      ...(result.code === "NOTE_CREATE_NOT_COMMITTED"
+        ? { code: result.code }
+        : {}),
     });
   return result;
 }

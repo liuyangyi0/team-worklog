@@ -25,7 +25,7 @@ export function createUploads({ db, store, project, document, metadata, complete
     if (active && (row.status !== "active" || row.expires < new Date().toISOString())) fail(409, "上传会话已结束或过期，请重新上传");
     return row;
   };
-  const summary = (row) => ({ id: row.id, chunk_size: CHUNK_SIZE, received_parts: db.prepare("SELECT part FROM document_upload_parts WHERE upload_id=? ORDER BY part").all(row.id).map((p) => p.part), total_parts: Math.ceil(row.size / CHUNK_SIZE), status: row.status, size: row.size, filename: row.filename, expires: row.expires, ...(row.result_json ? { result: JSON.parse(row.result_json) } : {}) });
+  const summary = (row) => ({ id: row.id, chunk_size: CHUNK_SIZE, received_parts: db.prepare("SELECT part FROM document_upload_parts WHERE upload_id=? ORDER BY part").all(row.id).map((p) => p.part), total_parts: Math.ceil(row.size / CHUNK_SIZE), status: row.status === "active" && row.expires < new Date().toISOString() ? "expired" : row.status, size: row.size, filename: row.filename, expires: row.expires, ...(row.result_json ? { result: JSON.parse(row.result_json) } : {}) });
   async function cleanup() {
     db.prepare("UPDATE document_uploads SET status='expired' WHERE status='active' AND expires<?").run(new Date().toISOString());
     // Only session UUIDs from this database are removed, never arbitrary supplied paths.
@@ -92,7 +92,11 @@ export function createUploads({ db, store, project, document, metadata, complete
       // Orphans are retained for explicit review; no automatic blob deletion can race backups.
       if (!db.prepare("SELECT sha256 FROM document_blobs WHERE sha256=?").get(blob.sha256)) db.prepare("INSERT OR IGNORE INTO document_blob_orphans(sha256,size,created) VALUES(?,?,?)").run(blob.sha256, blob.size, new Date().toISOString());
       const result = tx(db, () => {
-        const result = complete(current, blob, user);
+        // Assembly can overlap cleanup or cross the expiry time while holding the
+        // session lock. Keep the assembled orphan accounted for, but never commit
+        // a document after the session has become expired or cancelled.
+        const fresh = get(row.id, user);
+        const result = complete(fresh, blob, user);
         db.prepare("DELETE FROM document_blob_orphans WHERE sha256=?").run(blob.sha256);
         return result;
       });

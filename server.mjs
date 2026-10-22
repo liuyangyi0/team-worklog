@@ -906,7 +906,10 @@ export async function createApp({
       if (!e.status) console.error("Request failed:", e.message);
       if (!res.headersSent)
         json(
-          { error: e.status ? e.message : "保存失败，请稍后重试" },
+          {
+            error: e.status ? e.message : "保存失败，请稍后重试",
+            ...(e.code === "NOTE_CREATE_NOT_COMMITTED" ? { code: e.code } : {}),
+          },
           e.status || 500,
         );
       else res.end();

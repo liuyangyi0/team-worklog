@@ -53,6 +53,9 @@ const targets = process.argv.slice(2).length
       "file-exchange.browser.cjs",
       "file-exchange-integration.browser.cjs",
       "note-create-files.browser.cjs",
+      "note-save-review.browser.cjs",
+      "note-replay-integration.browser.cjs",
+      "task-materials-review.browser.cjs",
     ];
 let executable = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
 if (!executable && process.platform === "win32") {
