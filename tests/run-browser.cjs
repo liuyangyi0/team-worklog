@@ -43,6 +43,10 @@ const targets = process.argv.slice(2).length
       "handover-evidence.browser.cjs",
       "deployment-baseline.browser.cjs",
       "statistics-notices.browser.cjs",
+      "project-overview.browser.cjs",
+      "milestones.browser.cjs",
+      "change-ledger.browser.cjs",
+      "project-management.browser.cjs",
     ];
 let executable = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
 if (!executable && process.platform === "win32") {

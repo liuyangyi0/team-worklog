@@ -1,4 +1,7 @@
 import MyTodos from "./components/MyTodos.jsx";
+import ProjectOverview from "./components/ProjectOverview.jsx";
+import ProjectMilestones from "./components/ProjectMilestones.jsx";
+import ChangeLedger from "./components/ChangeLedger.jsx";
 import Notifications from "./components/Notifications.jsx";
 import TaskDetail from "./components/TaskDetail.jsx";
 import PeopleOverview from "./components/PeopleOverview.jsx";
@@ -82,6 +85,16 @@ export default function App() {
     [keyword, setKeyword] = useState(""),
     [page, setPage] = useState(1),
     [overview, setOverview] = useState(false),
+    [authEpoch, setAuthEpoch] = useState(0),
+    [portfolioView, setPortfolioView] = useState(
+      () => new URLSearchParams(location.search).get("view") === "projects",
+    ),
+    [milestoneId, setMilestoneId] = useState(
+      () => new URLSearchParams(location.search).get("milestone") || "",
+    ),
+    [changeId, setChangeId] = useState(
+      () => new URLSearchParams(location.search).get("change") || "",
+    ),
     [todosView, setTodosView] = useState(false),
     [notificationsOpen, setNotificationsOpen] = useState(false),
     [detailId, setDetailId] = useState(""),
@@ -98,9 +111,14 @@ export default function App() {
     [tab, setTab] = useState("records"),
     [projectModule, setProjectModule] = useState(() => {
       const value = new URLSearchParams(location.search).get("module");
-      return ["notes", "documents", "resources", "resource-events"].includes(
-        value,
-      )
+      return [
+        "notes",
+        "documents",
+        "resources",
+        "resource-events",
+        "milestones",
+        "changes",
+      ].includes(value)
         ? value
         : "records";
     }),
@@ -251,13 +269,46 @@ export default function App() {
   function choose(p) {
     setOverview(false);
     setTodosView(false);
+    setPortfolioView(false);
+    setMilestoneId("");
+    setChangeId("");
     setProjectId(p.id);
+    setCapture(false);
     resetFilters();
     const u = new URL(location.href);
     u.searchParams.set("project", p.id);
-    for (const key of ["document", "credential", "configuration"])
+    for (const key of [
+      "document",
+      "credential",
+      "configuration",
+      "milestone",
+      "change",
+      "view",
+    ])
       u.searchParams.delete(key);
     history.replaceState(null, "", u);
+  }
+  function navigateProject(p, module = "records", detail = {}) {
+    choose(p);
+    setProjectModule(module);
+    setMilestoneId(detail.milestone || "");
+    setChangeId(detail.change || "");
+    const next = new URL(location.href);
+    next.searchParams.set("module", module);
+    if (detail.milestone) next.searchParams.set("milestone", detail.milestone);
+    if (detail.change) next.searchParams.set("change", detail.change);
+    history.replaceState(null, "", next);
+  }
+  function openManagementTask(task) {
+    const id = typeof task === "string" ? task : task.id;
+    act(async () => {
+      const latest = await refresh(true);
+      const current = latest.records.find((r) => r.id === id);
+      if (!current) return notify("这条任务已被删除，请刷新后查看");
+      const target = latest.projects.find((p) => p.id === current.project_id);
+      if (target) navigateProject(target, "records");
+      setDetailId(id);
+    });
   }
   function requireUser(next) {
     setModal(user ? next : { type: "auth", next });
@@ -383,6 +434,9 @@ export default function App() {
     setLibraryRevision((n) => n + 1);
     refresh(true).catch(() => {});
   }
+  function managementChanged() {
+    setLogRevision((n) => n + 1);
+  }
   async function contentChanged() {
     setLogRevision((n) => n + 1);
     await refresh(true);
@@ -398,6 +452,24 @@ export default function App() {
         projects={projects}
         project={project}
         user={user}
+        portfolioActive={portfolioView}
+        onPortfolio={() => {
+          setPortfolioView(true);
+          setTodosView(false);
+          setOverview(false);
+          setCapture(false);
+          const next = new URL(location.href);
+          next.searchParams.set("view", "projects");
+          for (const key of [
+            "document",
+            "credential",
+            "configuration",
+            "milestone",
+            "change",
+          ])
+            next.searchParams.delete(key);
+          history.replaceState(null, "", next);
+        }}
         todoActive={todosView}
         todoCount={myTodos(activeRecords, user?.name).length}
         unread={state.unread_notifications || 0}
@@ -405,6 +477,10 @@ export default function App() {
           if (!user) return setModal({ type: "auth", next: { type: "todos" } });
           setTodosView(true);
           setOverview(false);
+          setPortfolioView(false);
+          const next = new URL(location.href);
+          next.searchParams.delete("view");
+          history.replaceState(null, "", next);
           setCapture(false);
         }}
         onNotifications={() => setNotificationsOpen(true)}
@@ -412,11 +488,21 @@ export default function App() {
         onOverview={() => {
           setOverview(true);
           setTodosView(false);
+          setPortfolioView(false);
+          const next = new URL(location.href);
+          next.searchParams.delete("view");
+          history.replaceState(null, "", next);
           setCapture(false);
         }}
         onSettings={(p) => requireUser({ type: "settings", project: p })}
         onSelect={choose}
-        onNew={() => requireUser({ type: "project" })}
+        onNew={() => {
+          setPortfolioView(false);
+          const next = new URL(location.href);
+          next.searchParams.delete("view");
+          history.replaceState(null, "", next);
+          requireUser({ type: "project" });
+        }}
         onLogin={() => setModal({ type: "auth" })}
         onPassword={() => setModal({ type: "password" })}
         onMembers={() => setModal({ type: "members" })}
@@ -428,7 +514,19 @@ export default function App() {
         }
       />
       <main className="workbench-main flex min-w-0 flex-1 flex-col overflow-y-auto">
-        {todosView && user ? (
+        {portfolioView ? (
+          <ProjectOverview
+            key={(user?.id || "guest") + ":" + authEpoch}
+            user={user}
+            onLogin={() => setModal({ type: "auth" })}
+            onOpenProject={navigateProject}
+            onOpenTask={openManagementTask}
+            onOpenMilestone={(p, id) =>
+              navigateProject(p, "milestones", { milestone: id })
+            }
+            onOpenChanges={(p) => navigateProject(p, "changes")}
+          />
+        ) : todosView && user ? (
           <MyTodos
             key={user.id}
             user={user}
@@ -480,6 +578,8 @@ export default function App() {
               >
                 {[
                   ["records", "工作记录"],
+                  ["milestones", "项目里程碑"],
+                  ["changes", "需求变更"],
                   ["notes", "随手记"],
                   ["documents", "项目资料"],
                   ["resources", "资源与配置"],
@@ -497,6 +597,8 @@ export default function App() {
                     }
                     onClick={() => {
                       setProjectModule(id);
+                      setMilestoneId("");
+                      setChangeId("");
                       setCapture(false);
                       const next = new URL(location.href);
                       next.searchParams.set("module", id);
@@ -504,6 +606,9 @@ export default function App() {
                         "document",
                         "credential",
                         "configuration",
+                        "milestone",
+                        "change",
+                        "view",
                       ])
                         next.searchParams.delete(key);
                       if (project) next.searchParams.set("project", project.id);
@@ -556,7 +661,41 @@ export default function App() {
                   )}
                 </div>
               ) : null}
-              {projectModule === "notes" ? (
+              {projectModule === "milestones" ? (
+                <ProjectMilestones
+                  key={
+                    (project?.id || "") +
+                    ":" +
+                    (user?.id || "guest") +
+                    ":" +
+                    authEpoch
+                  }
+                  project={project}
+                  user={user}
+                  records={projectRecords}
+                  initialMilestoneId={milestoneId}
+                  onLogin={() => setModal({ type: "auth" })}
+                  onOpenTask={openManagementTask}
+                  onChanged={managementChanged}
+                />
+              ) : projectModule === "changes" ? (
+                <ChangeLedger
+                  key={
+                    (project?.id || "") +
+                    ":" +
+                    (user?.id || "guest") +
+                    ":" +
+                    authEpoch
+                  }
+                  project={project}
+                  user={user}
+                  records={projectRecords}
+                  initialChangeId={changeId}
+                  onLogin={() => setModal({ type: "auth" })}
+                  onOpenTask={openManagementTask}
+                  onChanged={managementChanged}
+                />
+              ) : projectModule === "notes" ? (
                 <SiteLog
                   key={
                     "notes:" + (project?.id || "") + ":" + (user?.id || "guest")
@@ -1086,9 +1225,11 @@ export default function App() {
             setModal(null);
             try {
               await refresh(true);
+              setAuthEpoch((n) => n + 1);
               if (next?.type === "todos") {
                 setTodosView(true);
                 setOverview(false);
+                setPortfolioView(false);
                 setCapture(false);
                 setModal(null);
               } else setModal(next || null);

@@ -40,6 +40,9 @@ import { installLibraryCommon, readResourceEvents } from "./library-common.mjs";
 import { createDocuments } from "./documents.mjs";
 import { createResources } from "./resources.mjs";
 import { createNotes } from "./notes.mjs";
+import { createMilestones } from "./milestones.mjs";
+import { createChangeLedger } from "./change-ledger.mjs";
+import { createProjectOverview } from "./project-overview.mjs";
 import http from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -223,6 +226,14 @@ export async function createApp({
   const documents = createDocuments({ db, dataDir, filesDir });
   const resources = createResources({ db, dataDir, documents, vaultKey });
   const notes = createNotes({ db });
+  const milestones = createMilestones({ db });
+  const changes = createChangeLedger({ db });
+  const projectOverview = createProjectOverview({
+    db,
+    getMilestoneSummary: (projectId) => milestones.summary(projectId),
+    getChangeSummary: (projectId) => changes.summary(projectId),
+    checklistSummary: () => documents.checklistSummary(),
+  });
   const limits = new Map(),
     secure = origin.startsWith("https:");
   function rate(req, kind, max, period) {
@@ -569,7 +580,14 @@ export async function createApp({
             201,
           );
         }
-        for (const service of [documents, resources, notes]) {
+        for (const service of [
+          documents,
+          resources,
+          notes,
+          milestones,
+          changes,
+          projectOverview,
+        ]) {
           const result = await service.api({
             route,
             method: req.method,

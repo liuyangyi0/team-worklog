@@ -4,6 +4,9 @@ import { api } from "../api.js";
 import { FormError, primary, secondary } from "./UI.jsx";
 
 const objects = {
+  "project-management": "项目管理资料",
+  milestone: "里程碑",
+  change: "需求变更",
   document: "文档",
   folder: "目录",
   release: "交付归档",

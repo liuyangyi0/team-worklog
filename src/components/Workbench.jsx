@@ -57,6 +57,8 @@ export function Sidebar({
   onLogout,
   overview,
   onOverview,
+  portfolioActive,
+  onPortfolio,
   onSettings,
   todoActive,
   todoCount = 0,
@@ -71,7 +73,8 @@ export function Sidebar({
     archivedProjects = projects.filter((p) => p.archived),
     showArchived = archivedOpen || Boolean(project?.archived);
   function projectEntry(p) {
-    const active = !overview && !todoActive && p.id === project?.id,
+    const active =
+        !overview && !todoActive && !portfolioActive && p.id === project?.id,
       c = colorOf(p.color);
     return (
       <div key={p.id} className="project-entry relative">
@@ -139,6 +142,19 @@ export function Sidebar({
         </div>
       </div>
       <div className="relative min-h-0 flex-1 overflow-y-auto px-3">
+        <button
+          onClick={onPortfolio}
+          aria-current={portfolioActive ? "page" : undefined}
+          className={
+            "portfolio-nav mb-2 flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-[13px] transition-colors " +
+            (portfolioActive
+              ? "bg-indigo-500/20 text-indigo-200 ring-1 ring-indigo-400/20"
+              : "text-slate-400 hover:bg-white/5 hover:text-slate-200")
+          }
+        >
+          <LayoutGrid className="h-4 w-4 shrink-0" />
+          跨项目总览
+        </button>
         <button
           onClick={onTodos}
           className={
