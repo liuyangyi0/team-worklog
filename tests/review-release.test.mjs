@@ -11,7 +11,7 @@ async function fixture(t) {
     path.join(os.tmpdir(), "worklog-release-review-"),
   );
   const origin = "http://127.0.0.1";
-  const app = await createApp({ dataDir, origin });
+  const app = await createApp({ allowUninvitedRegistration: true, dataDir, origin });
   await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
   t.after(async () => {
     await app.close();

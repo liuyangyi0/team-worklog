@@ -26,7 +26,7 @@ async function fixture(t, options = {}) {
   const server = http.createServer(async (req, res) => {
     const json = (data, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
     try {
-      const url = new URL(req.url, "http://local"), route = url.pathname;
+      const url = new URL(req.url, "http://localhost"), route = url.pathname;
       const user = db.prepare("SELECT * FROM users WHERE id=?").get(req.headers["x-user"] || "") || null;
       if (await docs.binary({ route, method: req.method, req, res, user, json })) return;
       let text = ""; for await (const chunk of req) text += chunk;

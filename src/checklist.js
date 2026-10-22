@@ -5,6 +5,13 @@ export const PROJECT_KINDS = [
   { id: "equipment", label: "设备项目资料" },
   { id: "both", label: "软硬件项目资料" },
 ];
+export const EVIDENCE_KINDS = [
+  { id: "record", label: "记录即可" },
+  { id: "file", label: "需要文件" },
+  { id: "published", label: "需要正式版文件" },
+  { id: "credential", label: "需要关联账号" },
+  { id: "configuration", label: "需要关联配置" },
+];
 // scope: which project kinds an item applies to; "all" applies to every kind.
 export const STARTER_CHECKLIST = [
   {
@@ -13,6 +20,7 @@ export const STARTER_CHECKLIST = [
     scope: "all",
     required: true,
     hint: "签订版扫描件或盖章 PDF",
+    evidence_kind: "published",
   },
   {
     title: "客户联系人与需求确认",
@@ -37,7 +45,13 @@ export const STARTER_CHECKLIST = [
     hint: "IP、参数、改了什么；可以直接用随手记记录",
   },
   { title: "接线与安装图、现场照片", stage: "实施", scope: "equipment" },
-  { title: "部署手册", stage: "实施", scope: "software", required: true },
+  {
+    title: "部署手册",
+    stage: "实施",
+    scope: "software",
+    required: true,
+    evidence_kind: "file",
+  },
   { title: "数据库脚本与运行配置", stage: "实施", scope: "software" },
   { title: "测试记录", stage: "验收", scope: "all" },
   {
@@ -45,14 +59,22 @@ export const STARTER_CHECKLIST = [
     stage: "验收",
     scope: "all",
     required: true,
+    evidence_kind: "published",
   },
-  { title: "操作 / 运维手册", stage: "交付", scope: "all", required: true },
+  {
+    title: "操作 / 运维手册",
+    stage: "交付",
+    scope: "all",
+    required: true,
+    evidence_kind: "file",
+  },
   {
     title: "账号与访问方式",
     stage: "交付",
     scope: "all",
     required: true,
     hint: "密码存入“资源与配置”的加密账号库，这里说明在哪里、怎么登录",
+    evidence_kind: "credential",
   },
   { title: "遗留问题清单", stage: "交付", scope: "all" },
   {
@@ -65,22 +87,42 @@ export const STARTER_CHECKLIST = [
 export function starterItems(kind) {
   return STARTER_CHECKLIST.filter(
     (item) => item.scope === "all" || kind === "both" || item.scope === kind,
-  ).map(({ title, stage, required = false, hint = "" }) => ({
-    title,
-    stage,
-    required,
-    hint,
-  }));
+  ).map(
+    ({
+      title,
+      stage,
+      required = false,
+      hint = "",
+      evidence_kind = "record",
+    }) => ({
+      title,
+      stage,
+      required,
+      hint,
+      evidence_kind,
+    }),
+  );
 }
 // Anything on file counts as provided; only an empty applicable item is missing.
-export const PROVIDED = ["ready", "draft", "recorded"];
+export const PROVIDED = ["ready", "draft", "recorded", "linked"];
 export function checklistProgress(items) {
   const required = items.filter((item) => item.applicable && item.required);
-  const missing = required.filter((item) => !PROVIDED.includes(item.status));
+  const missing = required.filter(
+    (item) => !PROVIDED.includes(item.collection_status || item.status),
+  );
   return {
     required: required.length,
     provided: required.length - missing.length,
     missing: missing.length,
-    unpublished: required.filter((item) => item.status === "draft").length,
+    unpublished: required.filter(
+      (item) => (item.collection_status || item.status) === "draft",
+    ).length,
   };
+}
+export function evidenceProgress(items) {
+  const required = items.filter((item) => item.applicable && item.required);
+  const met = required.filter(
+    (item) => item.evidence_met ?? PROVIDED.includes(item.status),
+  ).length;
+  return { required: required.length, met, missing: required.length - met };
 }

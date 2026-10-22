@@ -110,6 +110,12 @@ export function installAuditSchema(db) {
         "CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'operation logs are append-only'); END;" +
         "CREATE TRIGGER IF NOT EXISTS audit_no_replace BEFORE INSERT ON audit WHEN EXISTS(SELECT 1 FROM audit WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT, 'operation logs are append-only'); END;",
     );
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS audit_redactions(audit_id INTEGER PRIMARY KEY REFERENCES audit(id),actor_id TEXT NOT NULL REFERENCES users(id),actor_name TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS audit_redactions_no_update BEFORE UPDATE ON audit_redactions BEGIN SELECT RAISE(ABORT,'redactions are append-only'); END;
+      CREATE TRIGGER IF NOT EXISTS audit_redactions_no_delete BEFORE DELETE ON audit_redactions BEGIN SELECT RAISE(ABORT,'redactions are append-only'); END;
+      CREATE TRIGGER IF NOT EXISTS audit_redactions_no_replace BEFORE INSERT ON audit_redactions WHEN EXISTS(SELECT 1 FROM audit_redactions WHERE audit_id=NEW.audit_id) BEGIN SELECT RAISE(ABORT,'redactions are append-only'); END;
+    `);
     db.exec("COMMIT");
   } catch (e) {
     db.exec("ROLLBACK");
@@ -208,29 +214,64 @@ export function readAudit(db, params) {
     )
     .all(...values, limit + 1);
   const more = rows.length > limit;
-  const entries = rows.slice(0, limit).map((row) => ({
-    id: row.id,
-    actor: row.actor_name,
-    action: row.action,
-    entityId: row.entity,
-    entityType: isProject(row.action)
-      ? "project"
-      : isComment(row.action)
-        ? "comment"
-        : "record",
-    projectId: row.project_id,
-    projectName: row.project_name,
-    created: row.created,
-    before: snapshot(
-      row.before_json,
-      isProject(row.action),
-      isComment(row.action),
-    ),
-    after: snapshot(
-      row.after_json,
-      isProject(row.action),
-      isComment(row.action),
-    ),
-  }));
+  const entries = rows.slice(0, limit).map((row) => {
+    const redaction = db
+      .prepare(
+        "SELECT actor_name AS actor,reason,created_at AS created FROM audit_redactions WHERE audit_id=?",
+      )
+      .get(row.id);
+    return {
+      id: row.id,
+      actor: row.actor_name,
+      action: row.action,
+      entityId: row.entity,
+      entityType: isProject(row.action)
+        ? "project"
+        : isComment(row.action)
+          ? "comment"
+          : "record",
+      projectId: row.project_id,
+      projectName: redaction ? "项目名称已遮蔽" : row.project_name,
+      created: row.created,
+      before: redaction
+        ? null
+        : snapshot(
+            row.before_json,
+            isProject(row.action),
+            isComment(row.action),
+          ),
+      after: redaction
+        ? null
+        : snapshot(
+            row.after_json,
+            isProject(row.action),
+            isComment(row.action),
+          ),
+      ...(redaction ? { redaction } : {}),
+    };
+  });
   return { entries, total, nextCursor: more ? entries.at(-1).id : null };
+}
+
+export function redactAudit(db, user, auditId) {
+  if (!Number.isSafeInteger(auditId) || auditId < 1)
+    throw Object.assign(new Error("日志编号无效"), { status: 400 });
+  if (!db.prepare("SELECT id FROM audit WHERE id=?").get(auditId))
+    throw Object.assign(new Error("日志不存在"), { status: 404 });
+  if (
+    db
+      .prepare("SELECT audit_id FROM audit_redactions WHERE audit_id=?")
+      .get(auditId)
+  )
+    throw Object.assign(new Error("该日志已遮蔽"), { status: 409 });
+  const created = new Date().toISOString(),
+    reason = "误贴敏感信息";
+  db.prepare(
+    "INSERT INTO audit_redactions(audit_id,actor_id,actor_name,reason,created_at) VALUES(?,?,?,?,?)",
+  ).run(auditId, user.id, user.name, reason, created);
+  return {
+    ok: true,
+    auditId,
+    redaction: { actor: user.name, reason, created },
+  };
 }

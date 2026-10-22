@@ -23,7 +23,7 @@ const { chromium } = require(
   const origin = "http://127.0.0.1:8791";
   let app, browser, page;
   try {
-    app = await createApp({
+    app = await createApp({ allowUninvitedRegistration: true,
       dataDir,
       origin,
       dist: path.resolve(__dirname, "../dist"),

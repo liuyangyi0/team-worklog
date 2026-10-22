@@ -10,7 +10,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE_PATH||'playwright');
  const origin='http://127.0.0.1:8768',base=origin+'/worklog/api';
  let app,browser,p;
  try{
-  app=await createApp({dataDir,origin,dist:path.resolve(__dirname,'../dist')});
+  app=await createApp({ allowUninvitedRegistration: true,dataDir,origin,dist:path.resolve(__dirname,'../dist')});
   await new Promise(r=>app.server.listen(8768,'127.0.0.1',r));
   async function api(route,method='GET',body,cookie=''){
    const r=await fetch(base+route,{method,headers:{Origin:origin,'Content-Type':'application/json','X-Worklog-Request':'1',Cookie:cookie},body:body===undefined?undefined:JSON.stringify(body)});
@@ -28,6 +28,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE_PATH||'playwright');
   await p.getByRole('button',{name:'登录 / 注册',exact:false}).click();
   await p.getByRole('button',{name:'注册账号',exact:true}).click();
   await p.getByLabel('你的姓名',{exact:true}).fill('韩示例二');await p.getByLabel('账号',{exact:true}).fill('bob');await p.getByLabel('密码',{exact:true}).fill('Temporary-test-123');
+  await p.getByLabel('成员邀请码',{exact:true}).fill('a'.repeat(48));
   await p.getByLabel('你的姓名',{exact:true}).fill('名单外测试');
   await p.getByRole('button',{name:'注册并开始填写',exact:true}).click();
   await p.getByText('请填写真实姓名',{exact:true}).waitFor();

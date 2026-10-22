@@ -1,3 +1,4 @@
+import PublicNotice from "./PublicNotice.jsx";
 import { DependencyDetail } from "./Relations.jsx";
 import { TaskMaterials } from "./SiteLog.jsx";
 import { PriorityBadge, DueBadge } from "./Planning.jsx";
@@ -271,6 +272,11 @@ export default function TaskDetail({
           )}
         </section>
         <section className="mt-6" aria-label="任务评论">
+          {user && (
+            <div className="mb-4">
+              <PublicNotice />
+            </div>
+          )}
           <div className="mb-4 flex items-center justify-between">
             <h4 className="flex items-center gap-2 text-sm font-semibold text-slate-700">
               <MessageSquare className="h-4 w-4 text-indigo-400" />

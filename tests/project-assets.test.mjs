@@ -443,7 +443,7 @@ test("asset HTTP routes: guests blocked, registered members can edit, public sta
   let app;
   try {
     const origin = "http://127.0.0.1:8789";
-    app = await createApp({ dataDir, origin });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir, origin });
     await new Promise((r) => app.server.listen(8789, "127.0.0.1", r));
     const api = async (route, method = "GET", body, cookie = "") => {
       const res = await fetch(origin + "/worklog/api" + route, {

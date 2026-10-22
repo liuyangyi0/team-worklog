@@ -89,7 +89,17 @@ export default function ProjectResources(props) {
   );
 }
 function ResourceSession({ project, user, members = [] }) {
-  const [tab, setTab] = useState("resources"),
+  const [tab, setTab] = useState(() => {
+      const requested = new URLSearchParams(location.search).get("resourceTab");
+      return [
+        "resources",
+        "credentials",
+        "configurations",
+        "deployments",
+      ].includes(requested)
+        ? requested
+        : "resources";
+    }),
     [data, setData] = useState({
       resources: [],
       categories: [],
@@ -104,7 +114,8 @@ function ResourceSession({ project, user, members = [] }) {
     [modal, setModal] = useState(null),
     [notice, setNotice] = useState("");
   const active = useRef(true),
-    sequence = useRef(0);
+    sequence = useRef(0),
+    linkHandled = useRef(false);
   useEffect(
     () => () => {
       active.current = false;
@@ -143,6 +154,22 @@ function ResourceSession({ project, user, members = [] }) {
   }, []);
   const { resources, categories, environments, credentials, configurations } =
     data;
+  useEffect(() => {
+    if (!loaded || error || linkHandled.current) return;
+    const params = new URLSearchParams(location.search);
+    if (params.get("project") && params.get("project") !== project.id) return;
+    const credentialId = params.get("credential"),
+      configurationId = params.get("configuration");
+    if (!credentialId && !configurationId) return;
+    linkHandled.current = true;
+    const item = credentialId
+      ? credentials.find((c) => c.id === credentialId)
+      : configurations.find((c) => c.id === configurationId);
+    setTab(credentialId ? "credentials" : "configurations");
+    if (item)
+      setModal({ type: credentialId ? "credential" : "configuration", item });
+    else setNotice("关联资料已移除或不在本项目，请在列表或回收站核对。");
+  }, [loaded, error, credentials, configurations, project.id]);
   const matching = (item) =>
     (!resourceFilter ||
       (tab === "resources" ? item.id : item.resource_id) === resourceFilter) &&
@@ -1045,13 +1072,17 @@ function ResourceDialog({
               {selectedCategory ? (
                 <>
                   <div className="grid gap-4 sm:grid-cols-2">
-                    <Field label="资源名称">
+                    <Field
+                      label="资源名称"
+                      hint="需要分别登记版本的现场，请分别建立运行实例；产品资料仍可共享。"
+                    >
                       <input
                         required
                         maxLength={150}
                         value={form.name}
                         onChange={(e) => update("name", e.target.value)}
                         className={inputClass}
+                        placeholder="如：A现场监控应用 / B现场监控应用"
                       />
                     </Field>
                     <Field label="所属环境">
@@ -2595,17 +2626,21 @@ function ApplicationDialog({
     >
       <form onSubmit={save}>
         <div className="space-y-4 px-6">
-          <Field label="目标资源">
+          <Field
+            label="目标资源"
+            hint="请选择具体现场运行实例。A、B现场配置不同，应分别登记到各自的应用、主机或设备。"
+          >
             <select
               className={inputClass}
               required
               value={form.resource_id}
               onChange={(e) => update("resource_id", e.target.value)}
             >
-              <option value="">选择应用到的资源</option>
+              <option value="">选择实际应用到的现场实例</option>
               {resources.map((r) => (
                 <option value={r.id} key={r.id}>
                   {r.name}
+                  {r.environment_name ? ` · ${r.environment_name}` : ""}
                 </option>
               ))}
             </select>

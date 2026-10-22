@@ -39,7 +39,7 @@ const { chromium } = require(
     return data;
   }
   try {
-    app = await createApp({ dataDir, origin, dist: path.join(repo, "dist") });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir, origin, dist: path.join(repo, "dist") });
     await new Promise((r) => app.server.listen(8793, "127.0.0.1", r));
     await api("/register", "POST", {
       name: REGISTRATION_NAMES[0],

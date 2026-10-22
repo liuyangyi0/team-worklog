@@ -1,8 +1,8 @@
 const assert=require('node:assert/strict');const fs=require('node:fs/promises');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const {chromium}=require(process.env.PLAYWRIGHT_MODULE_PATH||'playwright');
 (async()=>{
- const {createApp}=await import(pathToFileURL(path.resolve(__dirname,'../server.mjs')).href);const dir=await fs.mkdtemp(path.join(os.tmpdir(),'worklog-collab-browser-'));const origin='http://127.0.0.1:8770',base=origin+'/worklog/api';let app,browser,p;
+ const {createApp}=await import(pathToFileURL(path.resolve(__dirname,'../server.mjs')).href);const dir=await fs.mkdtemp(path.join(os.tmpdir(),'worklog-collab-browser-'));const origin='http://127.0.0.1:8780',base=origin+'/worklog/api';let app,browser,p;
  try{
-  app=await createApp({dataDir:dir,origin,dist:path.resolve(__dirname,'../dist')});await new Promise(r=>app.server.listen(8770,'127.0.0.1',r));
+  app=await createApp({ allowUninvitedRegistration: true,dataDir:dir,origin,dist:path.resolve(__dirname,'../dist')});await new Promise(r=>app.server.listen(8780,'127.0.0.1',r));
   async function api(route,method='GET',body,cookie=''){const r=await fetch(base+route,{method,headers:{Origin:origin,'Content-Type':'application/json','X-Worklog-Request':'1',Cookie:cookie},body:body===undefined?undefined:JSON.stringify(body)});const data=await r.json();assert.ok(r.ok,JSON.stringify(data));return{data,cookie:r.headers.get('set-cookie')?.split(';')[0]};}
   const alice=await api('/register','POST',{name:'胡示例三',login:'collab_alice',password:'Temporary-test-123'});await api('/register','POST',{name:'韩示例二',login:'collab_bob',password:'Temporary-test-123'});
   const initial=(await api('/state')).data;const a=initial.projects[0],b=(await api('/projects','POST',{name:'运维平台',color:'emerald',members:['胡示例三','韩示例二']},alice.cookie)).data;

@@ -23,7 +23,19 @@ import {
   activeDescendants,
   commentsAPI,
 } from "./tasks.mjs";
-import { installAuditSchema, appendAudit, readAudit } from "./audit.mjs";
+import {
+  installAuditSchema,
+  appendAudit,
+  readAudit,
+  redactAudit,
+} from "./audit.mjs";
+import {
+  installMemberSchema,
+  isMemberActive,
+  requireMemberAdmin,
+  consumeInvitation,
+  createMemberAdmin,
+} from "./members.mjs";
 import { installLibraryCommon, readResourceEvents } from "./library-common.mjs";
 import { createDocuments } from "./documents.mjs";
 import { createResources } from "./resources.mjs";
@@ -131,9 +143,11 @@ export async function createApp({
   origin = process.env.APP_ORIGIN || "http://127.0.0.1:8766",
   base = "/worklog",
   adminPassword = process.env.ADMIN_PASSWORD,
+  adminLogin = process.env.ADMIN_LOGIN || "admin",
   dist = path.resolve("dist"),
   filesDir = process.env.FILES_DIR,
   vaultKey = process.env.VAULT_MASTER_KEY,
+  allowUninvitedRegistration = false,
 } = {}) {
   fs.mkdirSync(dataDir, { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, "worklog.sqlite"));
@@ -148,6 +162,7 @@ export async function createApp({
       "CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,actor TEXT,action TEXT,entity TEXT,before_json TEXT,after_json TEXT,created TEXT);" +
       "CREATE INDEX IF NOT EXISTS records_project ON records(project_id,deleted); CREATE INDEX IF NOT EXISTS session_expiry ON sessions(expires);",
   );
+  installMemberSchema(db);
   const projectColumns = db
     .prepare("PRAGMA table_info(projects)")
     .all()
@@ -168,11 +183,23 @@ export async function createApp({
     all = (sql, ...p) => db.prepare(sql).all(...p),
     run = (sql, ...p) => db.prepare(sql).run(...p);
   if (adminPassword && !get("SELECT id FROM users WHERE role='admin'")) {
+    adminLogin =
+      typeof adminLogin === "string" ? adminLogin.trim().toLowerCase() : "";
+    if (!/^[a-z0-9_\-]{3,32}$/.test(adminLogin)) {
+      db.close();
+      throw new Error("ADMIN_LOGIN 需为3–32位字母、数字、下划线或短横线");
+    }
+    if (get("SELECT id FROM users WHERE login=?", adminLogin)) {
+      db.close();
+      throw new Error(
+        "管理员登录账号已被已有成员占用，请设置其他 ADMIN_LOGIN；不会自动提升已有成员权限",
+      );
+    }
     password({ password: adminPassword });
     run(
       "INSERT INTO users VALUES(?,?,?,?,?,?)",
       randomUUID(),
-      "admin",
+      adminLogin,
       "管理员",
       await hashPassword(adminPassword),
       "admin",
@@ -221,7 +248,7 @@ export async function createApp({
     const token = tokenOf(req);
     return token
       ? get(
-          "SELECT u.id,u.login,u.name,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?",
+          "SELECT u.id,u.login,u.name,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>? AND NOT EXISTS(SELECT 1 FROM member_status WHERE user_id=u.id AND disabled_at<>'')",
           digest(token),
           Date.now(),
         ) || null
@@ -260,6 +287,12 @@ export async function createApp({
       throw e;
     }
   }
+  const memberAdmin = createMemberAdmin({
+    db,
+    tx,
+    hashPassword,
+    validatePassword: password,
+  });
   const canEdit = (user) => Boolean(user);
   // The navigation badge is a convenience; never let it break the main state.
   function checklistSummary() {
@@ -442,7 +475,7 @@ export async function createApp({
             60000,
           );
         }
-        const user = currentUser(req);
+        let user = currentUser(req);
         if (
           route === "/api/resource-events" ||
           route.startsWith("/api/resource-events/")
@@ -516,6 +549,26 @@ export async function createApp({
               );
         if (!b || typeof b !== "object" || Array.isArray(b))
           fail(400, "请求格式错误");
+        // A member can be disabled or have their sessions reset while a request body is arriving.
+        user = currentUser(req);
+        const memberResult = await memberAdmin({
+          route,
+          method: req.method,
+          b,
+          user,
+          sessionValid: () => currentUser(req)?.id === user?.id,
+        });
+        if (memberResult)
+          return json(memberResult.data, memberResult.status || 200);
+        if (route === "/api/admin/audit-redactions" && req.method === "POST") {
+          requireMemberAdmin(db, user);
+          if (b.currentContentReviewed !== true)
+            fail(400, "请先处理仍在公开的正文及其他副本，再确认遮蔽历史");
+          return json(
+            tx(() => redactAudit(db, user, b.auditId)),
+            201,
+          );
+        }
         for (const service of [documents, resources, notes]) {
           const result = await service.api({
             route,
@@ -559,20 +612,24 @@ export async function createApp({
           const id = randomUUID(),
             hash = await hashPassword(p);
           try {
-            run(
-              "INSERT INTO users VALUES(?,?,?,?,?,?)",
-              id,
-              login,
-              name,
-              hash,
-              "member",
-              now(),
-            );
+            tx(() => {
+              run(
+                "INSERT INTO users VALUES(?,?,?,?,?,?)",
+                id,
+                login,
+                name,
+                hash,
+                "member",
+                now(),
+              );
+              if (!allowUninvitedRegistration)
+                consumeInvitation(db, id, name, b.invitationCode);
+              session(res, id);
+            });
           } catch (e) {
             if (String(e).includes("UNIQUE")) fail(409, "这个账号已被使用");
             throw e;
           }
-          session(res, id);
           return json({ ok: true }, 201);
         }
         if (route === "/api/login" && req.method === "POST") {
@@ -580,7 +637,7 @@ export async function createApp({
           const login = field(b, "login", 32),
             p = password(b),
             target = get("SELECT * FROM users WHERE login=?", login);
-          if (!target) {
+          if (!target || !isMemberActive(db, target.id)) {
             await derive(p, "worklog-dummy-salt", 64);
             fail(401, "账号或密码不正确");
           }
@@ -589,7 +646,8 @@ export async function createApp({
           // Verification is asynchronous: a concurrent password change must invalidate this login.
           if (
             get("SELECT password FROM users WHERE id=?", target.id)
-              ?.password !== target.password
+              ?.password !== target.password ||
+            !isMemberActive(db, target.id)
           )
             fail(401, "账号或密码不正确");
           session(res, target.id);
@@ -619,6 +677,14 @@ export async function createApp({
             fail(400, "原密码不正确");
           const nextHash = await hashPassword(next);
           tx(() => {
+            if (!isMemberActive(db, user.id))
+              fail(401, "账号已停用，请联系管理员");
+            if (
+              get("SELECT password FROM users WHERE id=?", user.id)
+                ?.password !== previousHash
+            )
+              fail(409, "密码已被修改，请重新登录后重试");
+            if (!currentUser(req)) fail(401, "登录已失效，请重新登录");
             const changed = run(
               "UPDATE users SET password=? WHERE id=? AND password=?",
               nextHash,

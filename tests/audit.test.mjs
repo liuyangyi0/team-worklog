@@ -58,7 +58,7 @@ test("exact 22-person registration list; invalid names have the required message
 });
 test("registration gate, public immutable history and complete edit audit", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "worklog-audit-"));
-  const app = await createApp({ dataDir: dir, origin: "https://worklog.example.com" });
+  const app = await createApp({ allowUninvitedRegistration: true, dataDir: dir, origin: "https://worklog.example.com" });
   await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
   const root = "http://127.0.0.1:" + app.server.address().port + "/worklog/api";
   async function api(route, method = "GET", body, cookie = "") {
@@ -423,14 +423,14 @@ test("legacy logs migrate without rewriting original history; protection remains
   old.close();
   let app;
   try {
-    app = await createApp({ dataDir: dir });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir: dir });
     const legacy = app.db.prepare("SELECT * FROM audit").get();
     for (const k of Object.keys(original)) assert.equal(legacy[k], original[k]);
     assert.equal(legacy.actor_name, "胡示例三");
     assert.equal(legacy.project_id, "p");
     assert.equal(legacy.project_name, "旧项目");
     app.db.close();
-    app = await createApp({ dataDir: dir });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir: dir });
     assert.equal(app.db.prepare("SELECT COUNT(*) AS n FROM audit").get().n, 1);
     assert.throws(() => app.db.exec("DELETE FROM audit"), /append-only/);
   } finally {

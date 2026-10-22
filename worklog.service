@@ -10,7 +10,7 @@ Environment=NODE_ENV=production
 Environment=HOST=127.0.0.1
 Environment=PORT=8766
 Environment=DATA_DIR=/srv/worklog/data
-Environment=APP_ORIGIN=https://worklog.example.com
+## Set APP_ORIGIN in /srv/worklog/admin.env for your own deployment.
 EnvironmentFile=-/srv/worklog/admin.env
 ExecStart=/usr/bin/node /srv/worklog/app/server.mjs
 Restart=on-failure

@@ -12,7 +12,7 @@ test("dependencies, blocking, assistance, notifications and immutable audit", as
   );
   let app;
   try {
-    app = await createApp({ dataDir, origin: "https://worklog.example.com" });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir, origin: "https://worklog.example.com" });
     await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
     let base = "http://127.0.0.1:" + app.server.address().port + "/worklog/api";
     async function api(route, method = "GET", body, cookie = "") {
@@ -381,7 +381,7 @@ test("dependencies, blocking, assistance, notifications and immutable audit", as
         const before = await read(work);
         installDependencySchema(app.db);
         await app.close();
-        app = await createApp({ dataDir, origin: "https://worklog.example.com" });
+        app = await createApp({ allowUninvitedRegistration: true, dataDir, origin: "https://worklog.example.com" });
         await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
         base = "http://127.0.0.1:" + app.server.address().port + "/worklog/api";
         const after = await read(work);

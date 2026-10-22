@@ -9,7 +9,7 @@ import {
 import { api } from "../api.js";
 import { colorOf, priorityOf } from "../model.js";
 import { LOG_ACTIONS, logChanges, logTitle } from "../logs.js";
-import { secondary } from "./UI.jsx";
+import { Modal, primary, secondary } from "./UI.jsx";
 function display(value, key) {
   if (value === undefined || value === null) return "—";
   if (Array.isArray(value)) return value.length ? value.join("、") : "未设置";
@@ -18,14 +18,22 @@ function display(value, key) {
   if (key === "color") return colorOf(value).label;
   return String(value);
 }
-export default function OperationLog({ project, revision = 0 }) {
+export default function OperationLog({
+  project,
+  revision = 0,
+  user,
+  onChanged,
+}) {
   const [all, setAll] = useState(false),
     [entries, setEntries] = useState([]),
     [total, setTotal] = useState(0),
     [cursor, setCursor] = useState(null),
     [busy, setBusy] = useState(true),
     [moreBusy, setMoreBusy] = useState(false),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [redactEntry, setRedactEntry] = useState(null),
+    [reviewed, setReviewed] = useState(false),
+    [redacting, setRedacting] = useState(false);
   const sequence = useRef(0),
     olderLoaded = useRef(false),
     headBusy = useRef(false),
@@ -94,6 +102,26 @@ export default function OperationLog({ project, revision = 0 }) {
       if (seq === sequence.current) setError(e.message);
     } finally {
       if (seq === sequence.current) setMoreBusy(false);
+    }
+  }
+  async function redact(e) {
+    e.preventDefault();
+    if (!redactEntry || !reviewed || redacting) return;
+    setRedacting(true);
+    setError("");
+    try {
+      await api("/admin/audit-redactions", "POST", {
+        auditId: redactEntry.id,
+        currentContentReviewed: true,
+      });
+      setRedactEntry(null);
+      setReviewed(false);
+      await reload();
+      await onChanged?.();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setRedacting(false);
     }
   }
   return (
@@ -209,15 +237,39 @@ export default function OperationLog({ project, revision = 0 }) {
                       </time>
                     </div>
                     <p className="mt-2 whitespace-pre-wrap break-words text-sm font-medium text-slate-800">
-                      {logTitle(entry)}
+                      {entry.redaction
+                        ? "内容已因误贴敏感信息遮蔽"
+                        : logTitle(entry)}
                     </p>
                     <div className="mt-1 flex flex-wrap justify-between gap-2 text-[11px] text-slate-400">
                       <span>所属项目：{entry.projectName || "历史项目"}</span>
                       <span>日志 #{entry.id}</span>
+                      {user?.role === "admin" && !entry.redaction && (
+                        <button
+                          type="button"
+                          className="text-indigo-500"
+                          onClick={() => {
+                            setRedactEntry(entry);
+                            setReviewed(false);
+                          }}
+                        >
+                          遮蔽敏感内容
+                        </button>
+                      )}
                     </div>
                   </header>
                   <div className="divide-y divide-slate-50 px-5 py-1">
-                    {changes.length ? (
+                    {entry.redaction ? (
+                      <p className="py-3 text-xs leading-6 text-slate-500">
+                        {entry.redaction.actor} 于{" "}
+                        {new Date(entry.redaction.created).toLocaleString(
+                          "zh-CN",
+                          { hour12: false },
+                        )}{" "}
+                        遮蔽 · {entry.redaction.reason}
+                        。原日志保留，遮蔽记录不可删除。
+                      </p>
+                    ) : changes.length ? (
                       changes.map((change) => (
                         <div
                           key={change.key}
@@ -267,6 +319,53 @@ export default function OperationLog({ project, revision = 0 }) {
             </div>
           )}
         </>
+      )}
+      {redactEntry && (
+        <Modal
+          title="遮蔽敏感历史"
+          sub={`日志 #${redactEntry.id} · 原日志和处理记录保留`}
+          icon={LockKeyhole}
+          onClose={() => {
+            if (!redacting) setRedactEntry(null);
+          }}
+        >
+          <form className="space-y-4 px-6 pb-6" onSubmit={redact}>
+            <p className="rounded-xl bg-amber-50 p-4 text-xs leading-6 text-amber-800">
+              此操作只遮蔽这条日志的前后内容及项目名称。请先修改仍公开的任务、评论或项目正文；相同内容也可能出现在其他历史日志、导出或截图中，需要逐项处理。已泄露的真实密码仍需更换。
+            </p>
+            <p className="text-xs leading-6 text-slate-500">
+              遮蔽后，所有人（含管理员）通过普通页面和接口都不再读取这条历史原文；原始审计仍保留在受保护数据库中。处理人、时间和固定原因会公开显示。
+            </p>
+            <label className="flex items-start gap-2 text-xs leading-6 text-slate-600">
+              <input
+                type="checkbox"
+                checked={reviewed}
+                disabled={redacting}
+                onChange={(e) => setReviewed(e.target.checked)}
+                className="mt-1.5 accent-indigo-600"
+              />
+              我已检查并处理公开正文及其他副本，确认遮蔽这条历史。
+            </label>
+            {error && (
+              <p role="alert" className="text-xs text-rose-600">
+                {error}
+              </p>
+            )}
+            <div className="flex justify-end gap-3">
+              <button
+                className={secondary}
+                disabled={redacting}
+                type="button"
+                onClick={() => setRedactEntry(null)}
+              >
+                取消
+              </button>
+              <button className={primary} disabled={!reviewed || redacting}>
+                {redacting ? "正在处理…" : "确认遮蔽并留痕"}
+              </button>
+            </div>
+          </form>
+        </Modal>
       )}
     </section>
   );

@@ -6,7 +6,7 @@ import path from "node:path";
 import { createApp } from "./server.mjs";
 test("public reads and unrestricted content editing after registration", async (t) => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "worklog-open-edit-"));
-  let app = await createApp({
+  let app = await createApp({ allowUninvitedRegistration: true,
     dataDir,
     origin: "https://worklog.example.com",
     adminPassword: "Admin-test-93427",
@@ -435,7 +435,7 @@ test("public reads and unrestricted content editing after registration", async (
         assert.ok(edit);
         assert.equal(JSON.parse(edit.after_json).task, "韩示例二修改他人记录");
         await app.close();
-        app = await createApp({ dataDir, origin: "https://worklog.example.com" });
+        app = await createApp({ allowUninvitedRegistration: true, dataDir, origin: "https://worklog.example.com" });
         await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
         endpoint =
           "http://127.0.0.1:" + app.server.address().port + "/worklog/api";
@@ -484,7 +484,7 @@ test("legacy project migration preserves data and is idempotent", async () => {
   old.close();
   let app;
   try {
-    app = await createApp({ dataDir });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir });
     let p = app.db.prepare("SELECT * FROM projects").get();
     assert.equal(p.id, "legacy-project");
     assert.equal(p.version, 7);
@@ -492,7 +492,7 @@ test("legacy project migration preserves data and is idempotent", async () => {
     assert.equal(p.color, "indigo");
     assert.equal(p.members, "[]");
     app.db.close();
-    app = await createApp({ dataDir });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir });
     assert.equal(
       app.db.prepare("SELECT COUNT(*) AS n FROM projects").get().n,
       1,
@@ -612,7 +612,7 @@ test("unfinished records allow no completer and can later be completed or reopen
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "worklog-pending-"));
   let app;
   try {
-    app = await createApp({ dataDir, origin: "https://worklog.example.com" });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir, origin: "https://worklog.example.com" });
     await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
     const endpoint =
       "http://127.0.0.1:" + app.server.address().port + "/worklog/api";
@@ -728,7 +728,7 @@ test("unfinished records allow no completer and can later be completed or reopen
       ),
     );
     await app.close();
-    app = await createApp({ dataDir });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir });
     const saved = app.db
       .prepare("SELECT actual,date FROM records WHERE id=?")
       .get(record.id);

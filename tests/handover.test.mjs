@@ -9,7 +9,7 @@ import { starterItems, checklistProgress } from "../src/checklist.js";
 const origin = "https://worklog.example.com";
 async function start(t) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "worklog-handover-"));
-  const app = await createApp({ dataDir, origin });
+  const app = await createApp({ allowUninvitedRegistration: true, dataDir, origin });
   await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
   t.after(async () => {
     await app.close();
@@ -486,14 +486,14 @@ test("older databases gain the checklist columns and site log tables", async (t)
     path.join(os.tmpdir(), "worklog-handover-migrate-"),
   );
   t.after(() => rm(dataDir, { recursive: true, force: true }));
-  let app = await createApp({ dataDir, origin });
+  let app = await createApp({ allowUninvitedRegistration: true, dataDir, origin });
   await app.close();
   const db = new DatabaseSync(path.join(dataDir, "worklog.sqlite"));
   db.exec(
     "DROP TABLE project_note_files; DROP TABLE project_notes; ALTER TABLE document_deliverables DROP COLUMN hint; ALTER TABLE document_deliverables DROP COLUMN stage;",
   );
   db.close();
-  app = await createApp({ dataDir, origin });
+  app = await createApp({ allowUninvitedRegistration: true, dataDir, origin });
   const columns = app.db
     .prepare("PRAGMA table_info(document_deliverables)")
     .all()

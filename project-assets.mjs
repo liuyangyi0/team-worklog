@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createDeploymentBaselines } from "./deployment-baselines.mjs";
 import {
   libraryFail as fail,
   libraryTx as tx,
@@ -139,6 +140,7 @@ export function createProjectAssets(db) {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
   `);
+  const baselines = createDeploymentBaselines(db);
   const columns = all("PRAGMA table_info(resources)").map((c) => c.name);
   if (!columns.includes("category_id"))
     db.exec(
@@ -401,9 +403,13 @@ export function createProjectAssets(db) {
   }
   function deployment(row) {
     const { data_json, ...safe } = row;
+    const data = json(data_json);
     return {
       ...safe,
-      ...json(data_json),
+      delivery_release_id: null,
+      configuration_version_ids: [],
+      ...data,
+      ...baselines.metadata(data),
       environment_name: row.environment_id
         ? get("SELECT name FROM environments WHERE id=?", row.environment_id)
             ?.name || ""
@@ -412,7 +418,7 @@ export function createProjectAssets(db) {
   }
   function deploymentData(body, old) {
     const before = json(old.data_json || "{}");
-    const result = {};
+    const result = baselines.validate(old.project_id, body, before);
     for (const [key, label, max] of [
       ["site", "客户 / 部署单位", 200],
       ["location", "部署位置", 500],
@@ -482,12 +488,21 @@ export function createProjectAssets(db) {
     user,
     params = new URLSearchParams(),
   }) {
+    const optionsMatch = route.match(
+      /^\/projects\/([\w-]+)\/deployment-options$/,
+    );
+    if (optionsMatch) {
+      if (!user) fail(401, "请先登录后查看项目内部资料");
+      if (method !== "GET") fail(405, "不支持的资料操作");
+      project(optionsMatch[1]);
+      return { data: baselines.options(optionsMatch[1]) };
+    }
     const match =
       route.match(
         /^\/projects\/([\w-]+)\/(resource-categories|deployments)$/,
       ) ||
       route.match(
-        /^\/(resource-categories|deployments)\/([\w-]+)(?:\/(restore))?$/,
+        /^\/(resource-categories|deployments)\/([\w-]+)(?:\/(restore|baselines))?$/,
       );
     if (!match) return null;
     if (!user) fail(401, "请先登录后查看项目内部资料");
@@ -606,8 +621,10 @@ export function createProjectAssets(db) {
       const old = collection
         ? { project_id: projectId }
         : get("SELECT * FROM project_deployments WHERE id=?", id);
-      if (!old || (old.deleted && action !== "restore"))
+      if (!old || (old.deleted && !["restore", "baselines"].includes(action)))
         fail(404, "部署记录不存在或已移除");
+      if (!collection && action === "baselines" && method === "GET")
+        return { data: baselines.history(id, params.get("before")) };
       if (!collection && !action && method === "GET")
         return { data: { deployment: deployment(old) } };
       if (
@@ -622,6 +639,7 @@ export function createProjectAssets(db) {
               project_id: old.project_id,
               name: d.name,
             };
+          if (!collection) baselines.append(old, user);
           if (collection)
             run(
               "INSERT INTO project_deployments(id,project_id,name,environment_id,status,data_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -644,6 +662,10 @@ export function createProjectAssets(db) {
               now(),
               id,
             );
+          baselines.append(
+            get("SELECT * FROM project_deployments WHERE id=?", value.id),
+            user,
+          );
           event(
             user,
             collection ? "create-deployment" : "update-deployment",

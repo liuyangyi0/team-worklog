@@ -17,7 +17,7 @@ test("subtasks, public comments and cross-project accounting", async (t) => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "worklog-collab-"));
   let app;
   try {
-    app = await createApp({ dataDir, origin: "https://worklog.example.com" });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir, origin: "https://worklog.example.com" });
     await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
     const base =
       "http://127.0.0.1:" + app.server.address().port + "/worklog/api";
@@ -404,7 +404,7 @@ test("subtasks, public comments and cross-project accounting", async (t) => {
     const legacy = new DatabaseSync(path.join(dataDir, "worklog.sqlite"));
     legacy.exec("ALTER TABLE records DROP COLUMN completed_at");
     legacy.close();
-    app = await createApp({ dataDir });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir });
     assert.equal(
       app.db.prepare("SELECT completed_at FROM records WHERE id=?").get(root)
         .completed_at,
@@ -415,7 +415,7 @@ test("subtasks, public comments and cross-project accounting", async (t) => {
       originalHistory,
     );
     await app.close();
-    app = await createApp({ dataDir });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir });
     assert.equal(
       app.db.prepare("SELECT parent_id FROM records WHERE id=?").get(child)
         .parent_id,

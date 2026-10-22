@@ -1,6 +1,6 @@
 {
   "name": "team-worklog",
-  "version": "1.10.1",
+  "version": "1.11.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,8 @@
     "test": "node --test test.mjs tests/*.test.mjs",
     "format": "prettier --write src server.mjs audit.mjs registration.mjs backup.mjs test.mjs tests/audit.test.mjs tasks.mjs tests/collaboration.test.mjs planning.mjs tests/planning.test.mjs dependencies.mjs tests/dependencies.test.mjs",
     "test:browser": "node tests/run-browser.cjs",
-    "backup": "node backup.mjs"
+    "backup": "node backup.mjs",
+    "check:public": "node scripts/check-public-source.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.562.0",

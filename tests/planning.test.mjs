@@ -80,7 +80,7 @@ test("planning, assignment notifications, mention updates and private read state
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "worklog-planning-"));
   let app;
   try {
-    app = await createApp({ dataDir, origin: "https://worklog.example.com" });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir, origin: "https://worklog.example.com" });
     await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
     const base =
       "http://127.0.0.1:" + app.server.address().port + "/worklog/api";

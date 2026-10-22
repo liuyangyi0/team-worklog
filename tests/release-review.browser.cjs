@@ -18,7 +18,7 @@ const { chromium } = require(
     base = origin + "/worklog/api";
   let app, browser, releaseSave;
   try {
-    app = await createApp({
+    app = await createApp({ allowUninvitedRegistration: true,
       dataDir: dir,
       origin,
       dist: path.resolve(__dirname, "../dist"),

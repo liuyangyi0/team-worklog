@@ -53,6 +53,7 @@ export function Sidebar({
   onNew,
   onLogin,
   onPassword,
+  onMembers,
   onLogout,
   overview,
   onOverview,
@@ -264,6 +265,18 @@ export function Sidebar({
                     <KeyRound className="h-4 w-4" />
                     修改密码
                   </button>
+                  {user.role === "admin" && onMembers && (
+                    <button
+                      className="menu-item"
+                      onClick={() => {
+                        setAccountOpen(false);
+                        onMembers();
+                      }}
+                    >
+                      <UsersRound className="h-4 w-4" />
+                      成员与邀请
+                    </button>
+                  )}
                   <button
                     onClick={() => {
                       setAccountOpen(false);

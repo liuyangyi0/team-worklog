@@ -3,12 +3,13 @@ import Notifications from "./components/Notifications.jsx";
 import TaskDetail from "./components/TaskDetail.jsx";
 import PeopleOverview from "./components/PeopleOverview.jsx";
 import OperationLog from "./components/OperationLog.jsx";
+import MemberManagement from "./components/MemberManagement.jsx";
 import ProjectLibrary from "./components/ProjectLibrary.jsx";
 import ProjectResources from "./components/ProjectResources.jsx";
 import ResourceEvents from "./components/ResourceEvents.jsx";
 import Deliverables from "./components/Deliverables.jsx";
 import SiteLog, { NoteDialog } from "./components/SiteLog.jsx";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Settings,
   CheckCircle2,
@@ -116,6 +117,23 @@ export default function App() {
       projects.find((p) => p.id === projectId) ||
       projects.find((p) => !p.archived) ||
       projects[0];
+  const evidenceMissing =
+    state.checklist?.[project?.id]?.evidence_missing ??
+    state.checklist?.[project?.id]?.missing ??
+    0;
+  const previousUser = useRef(undefined);
+  useEffect(() => {
+    if (!loaded) return;
+    const current = user?.id || null;
+    if (previousUser.current && previousUser.current !== current) {
+      setModal(null);
+      setDetailId("");
+      setNoteDraft(null);
+      setSelectedIds(new Set());
+      setNotificationsOpen(false);
+    }
+    previousUser.current = current;
+  }, [loaded, user?.id]);
   // Archived projects stay browsable but leave personal to-do lists.
   const activeRecords = useMemo(() => {
     const archived = new Set(
@@ -237,7 +255,8 @@ export default function App() {
     resetFilters();
     const u = new URL(location.href);
     u.searchParams.set("project", p.id);
-    u.searchParams.delete("document");
+    for (const key of ["document", "credential", "configuration"])
+      u.searchParams.delete(key);
     history.replaceState(null, "", u);
   }
   function requireUser(next) {
@@ -400,6 +419,7 @@ export default function App() {
         onNew={() => requireUser({ type: "project" })}
         onLogin={() => setModal({ type: "auth" })}
         onPassword={() => setModal({ type: "password" })}
+        onMembers={() => setModal({ type: "members" })}
         onLogout={() =>
           act(async () => {
             await api("/logout", "POST", {});
@@ -471,11 +491,8 @@ export default function App() {
                     aria-current={projectModule === id ? "page" : undefined}
                     aria-label={label}
                     title={
-                      id === "documents" &&
-                      state.checklist?.[project?.id]?.missing > 0
-                        ? "必需资料缺 " +
-                          state.checklist[project.id].missing +
-                          " 项"
+                      id === "documents" && evidenceMissing > 0
+                        ? "必需资料证据未齐 " + evidenceMissing + " 项"
                         : undefined
                     }
                     onClick={() => {
@@ -483,7 +500,12 @@ export default function App() {
                       setCapture(false);
                       const next = new URL(location.href);
                       next.searchParams.set("module", id);
-                      next.searchParams.delete("document");
+                      for (const key of [
+                        "document",
+                        "credential",
+                        "configuration",
+                      ])
+                        next.searchParams.delete(key);
                       if (project) next.searchParams.set("project", project.id);
                       history.replaceState(null, "", next);
                     }}
@@ -495,15 +517,14 @@ export default function App() {
                     }
                   >
                     {label}
-                    {id === "documents" &&
-                      state.checklist?.[project?.id]?.missing > 0 && (
-                        <span
-                          aria-hidden="true"
-                          className="ml-1.5 rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] text-rose-500"
-                        >
-                          缺 {state.checklist[project.id].missing}
-                        </span>
-                      )}
+                    {id === "documents" && evidenceMissing > 0 && (
+                      <span
+                        aria-hidden="true"
+                        className="ml-1.5 rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] text-rose-500"
+                      >
+                        缺 {evidenceMissing}
+                      </span>
+                    )}
                   </button>
                 ))}
               </nav>
@@ -830,7 +851,12 @@ export default function App() {
                     ) : tab === "people" ? (
                       <PersonSummary records={filtered} capture={capture} />
                     ) : (
-                      <OperationLog project={project} revision={logRevision} />
+                      <OperationLog
+                        project={project}
+                        revision={logRevision}
+                        user={user}
+                        onChanged={refresh}
+                      />
                     )}
                   </div>
                   {tab !== "logs" && (
@@ -1072,6 +1098,9 @@ export default function App() {
             }
           }}
         />
+      )}
+      {modal?.type === "members" && user?.role === "admin" && (
+        <MemberManagement onClose={() => setModal(null)} onChanged={refresh} />
       )}
       {modal?.type === "record" && editingProject && (
         <RecordDialog

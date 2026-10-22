@@ -6,7 +6,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE_PATH||'playwright');
  const {createApp}=await import(pathToFileURL(path.resolve(__dirname,'../server.mjs')).href);
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'worklog-handover-browser-'));const origin='http://127.0.0.1:8777',base=origin+'/worklog/api';let app,browser,p;
  try{
-  app=await createApp({dataDir:dir,origin,dist:path.resolve(__dirname,'../dist')});await new Promise(r=>app.server.listen(8777,'127.0.0.1',r));
+  app=await createApp({ allowUninvitedRegistration: true,dataDir:dir,origin,dist:path.resolve(__dirname,'../dist')});await new Promise(r=>app.server.listen(8777,'127.0.0.1',r));
   async function api(route,method='GET',body,cookie=''){const r=await fetch(base+route,{method,headers:{Origin:origin,'Content-Type':'application/json','X-Worklog-Request':'1',Cookie:cookie},body:body===undefined?undefined:JSON.stringify(body)});const data=await r.json();assert.ok(r.ok,JSON.stringify(data));return{data,cookie:r.headers.get('set-cookie')?.split(';')[0]};}
   const alice=await api('/register','POST',{name:'胡示例三',login:'handover_alice',password:'Temporary-test-123'});
   browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EXECUTABLE_PATH?{executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH}:{})});

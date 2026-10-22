@@ -15,7 +15,7 @@ test("integrated private library, secrets, configuration and portable recovery",
     origin = "https://worklog.example.com";
   let app, restoredApp;
   try {
-    app = await createApp({ dataDir, origin });
+    app = await createApp({ allowUninvitedRegistration: true, dataDir, origin });
     await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
     let base = "http://127.0.0.1:" + app.server.address().port + "/worklog/api";
     async function api(
@@ -353,7 +353,7 @@ test("integrated private library, secrets, configuration and portable recovery",
           restoreWorkspaceBackup({ backupDir: saved.folder, targetDir }),
           /empty/,
         );
-        restoredApp = await createApp({ dataDir: targetDir, origin });
+        restoredApp = await createApp({ allowUninvitedRegistration: true, dataDir: targetDir, origin });
         await new Promise((resolve) =>
           restoredApp.server.listen(0, "127.0.0.1", resolve),
         );
@@ -393,7 +393,7 @@ test("integrated private library, secrets, configuration and portable recovery",
           path.join(dataDir, ".keys", "vault-v1.key"),
           path.join(targetDir, ".keys", "vault-v1.key"),
         );
-        restoredApp = await createApp({ dataDir: targetDir, origin });
+        restoredApp = await createApp({ allowUninvitedRegistration: true, dataDir: targetDir, origin });
         await new Promise((resolve) =>
           restoredApp.server.listen(0, "127.0.0.1", resolve),
         );

@@ -13,7 +13,7 @@ async function httpFixture() {
     path.join(os.tmpdir(), "worklog-review-auth-"),
   );
   const origin = "http://127.0.0.1";
-  const app = await createApp({ dataDir, origin });
+  const app = await createApp({ allowUninvitedRegistration: true, dataDir, origin });
   await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${app.server.address().port}/worklog/api`;
   async function api(route, method = "GET", body, cookie = "") {

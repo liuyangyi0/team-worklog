@@ -119,6 +119,8 @@ export default function ProjectDeployments({
             className={secondary}
             onClick={() => {
               setTrash(!trash);
+              setItems([]);
+              setError(null);
               setModal(null);
             }}
           >
@@ -191,28 +193,59 @@ export default function ProjectDeployments({
                   版本：{d.deployed_version || "未登记"} · 维护人：
                   {d.maintainer || "未指定"}
                 </p>
+                <p className="break-words">
+                  固定交付：{d.delivery_release?.name || "未关联文件归档"}
+                  {d.delivery_release?.voided ? "（已作废，历史保留）" : ""}
+                </p>
+                {!!d.configuration_versions?.length && (
+                  <p className="break-words">
+                    配置：
+                    {d.configuration_versions
+                      .map(
+                        (v) =>
+                          `${v.name || "历史配置"} V${v.number || "?"}${v.deleted ? "（已移除）" : ""}`,
+                      )
+                      .join("、")}
+                  </p>
+                )}
               </div>
               <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
                 <span className="text-[11px] text-slate-400">
                   {d.deployed_at || "部署日期未填写"}
                 </span>
                 {trash ? (
-                  <button
-                    className={secondary}
-                    disabled={busy}
-                    onClick={() => restore(d)}
-                  >
-                    <RotateCcw size={13} />
-                    恢复
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      className="text-xs text-indigo-500"
+                      onClick={() => setModal({ history: d })}
+                    >
+                      查看交付历史
+                    </button>
+                    <button
+                      className={secondary}
+                      disabled={busy}
+                      onClick={() => restore(d)}
+                    >
+                      <RotateCcw size={13} />
+                      恢复
+                    </button>
+                  </div>
                 ) : (
-                  <button
-                    className="inline-flex items-center gap-1 text-xs text-indigo-500"
-                    onClick={() => setModal({ item: d })}
-                  >
-                    查看 / 修改
-                    <ChevronRight size={13} />
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      className="text-xs text-slate-500"
+                      onClick={() => setModal({ create: true, copy: d })}
+                    >
+                      记录新交付
+                    </button>
+                    <button
+                      className="inline-flex items-center gap-1 text-xs text-indigo-500"
+                      onClick={() => setModal({ item: d })}
+                    >
+                      查看 / 修改
+                      <ChevronRight size={13} />
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
@@ -228,10 +261,17 @@ export default function ProjectDeployments({
       {busy && (
         <p className="py-5 text-center text-xs text-slate-400">正在载入…</p>
       )}
-      {modal && (
+      {modal?.history && (
+        <DeploymentHistoryDialog
+          item={modal.history}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal && !modal.history && (
         <DeploymentDialog
           key={modal.item?.id || "new"}
           item={modal.item}
+          initial={modal.copy}
           projectId={projectId}
           environments={environments}
           resources={resources}
@@ -247,6 +287,7 @@ export default function ProjectDeployments({
 }
 function DeploymentDialog({
   item,
+  initial,
   projectId,
   environments,
   resources,
@@ -259,12 +300,91 @@ function DeploymentDialog({
       method: "onsite",
       environment_id: "",
       resource_ids: [],
+      delivery_release_id: null,
+      configuration_version_ids: [],
       deployed_at: "",
       notes: "",
+      ...initial,
+      ...(initial ? { name: initial.name + " · 新交付" } : {}),
       ...item,
     }),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState(null);
+    [error, setError] = useState(null),
+    [options, setOptions] = useState(null),
+    [history, setHistory] = useState([]),
+    [historyBefore, setHistoryBefore] = useState(null),
+    [historyBusy, setHistoryBusy] = useState(false),
+    [retryOptions, setRetryOptions] = useState(0),
+    [copiedReferencesFiltered, setCopiedReferencesFiltered] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    api(`/projects/${projectId}/deployment-options`)
+      .then((r) => {
+        if (alive) {
+          setOptions(r);
+          if (initial) {
+            setForm((f) => {
+              const delivery_release_id = r.releases.some(
+                (v) => v.id === f.delivery_release_id,
+              )
+                ? f.delivery_release_id
+                : null;
+              const configuration_version_ids =
+                f.configuration_version_ids.filter((id) =>
+                  r.configurations.some((c) =>
+                    c.versions.some((v) => v.id === id),
+                  ),
+                );
+              return { ...f, delivery_release_id, configuration_version_ids };
+            });
+            if (
+              (initial.delivery_release_id &&
+                !r.releases.some(
+                  (v) => v.id === initial.delivery_release_id,
+                )) ||
+              initial.configuration_version_ids.some(
+                (id) =>
+                  !r.configurations.some((c) =>
+                    c.versions.some((v) => v.id === id),
+                  ),
+              )
+            )
+              setCopiedReferencesFiltered(true);
+          }
+        }
+      })
+      .catch((e) => {
+        if (alive) setError(e);
+      });
+    if (item)
+      api(`/deployments/${item.id}/baselines`)
+        .then((r) => {
+          if (alive) {
+            setHistory(r.baselines);
+            setHistoryBefore(r.next_before);
+          }
+        })
+        .catch((e) => {
+          if (alive) setError(e);
+        });
+    return () => {
+      alive = false;
+    };
+  }, [projectId, item?.id, retryOptions]);
+  async function loadEarlier() {
+    setHistoryBusy(true);
+    try {
+      const r = await api(
+        `/deployments/${item.id}/baselines?before=${historyBefore}`,
+      );
+      setHistory((h) => [...h, ...r.baselines]);
+      setHistoryBefore(r.next_before);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   async function save(e) {
     e.preventDefault();
@@ -279,6 +399,8 @@ function DeploymentDialog({
         resource_ids: form.resource_ids,
         deployed_at: form.deployed_at,
         notes: form.notes,
+        delivery_release_id: form.delivery_release_id || null,
+        configuration_version_ids: form.configuration_version_ids,
         ...Object.fromEntries(fields.map(([k]) => [k, form[k] || ""])),
         ...(item ? { version: item.version } : {}),
       };
@@ -309,13 +431,16 @@ function DeploymentDialog({
   return (
     <Modal
       title={item ? "项目部署 · " + item.name : "添加项目部署"}
-      sub="登记实际部署与交付去向；这里只保存资料，不会自动执行部署。"
+      sub="登记实际部署与固定交付版本；升级可另记一次新交付，历史基线保留。"
       icon={MapPin}
       wide
       onClose={onClose}
     >
       <form onSubmit={save}>
-        <div className="max-h-[65dvh] space-y-4 overflow-y-auto px-6">
+        <fieldset
+          disabled={busy}
+          className="max-h-[65dvh] space-y-4 overflow-y-auto px-6"
+        >
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="部署名称">
               <input
@@ -438,6 +563,159 @@ function DeploymentDialog({
                 ))}
             </div>
           </Field>
+          <div className="space-y-4 rounded-2xl border border-indigo-100 bg-indigo-50/40 p-4">
+            {copiedReferencesFiltered && (
+              <p role="status" className="text-xs leading-6 text-amber-700">
+                原交付中已作废的归档、已移除的配置不会复制到新交付，请选择本次有效的固定版本。原交付历史完整保留。
+              </p>
+            )}
+            <Field
+              label="固定文件交付归档"
+              hint="选择已生成的固定归档；后续文档更新不会改变这次交付。账号密码和配置正文不进入普通归档包。"
+            >
+              <select
+                className={inputClass}
+                value={form.delivery_release_id || ""}
+                onChange={(e) =>
+                  update("delivery_release_id", e.target.value || null)
+                }
+                disabled={!options}
+              >
+                <option value="">未关联（可选）</option>
+                {options?.releases.map((r) => (
+                  <option value={r.id} key={r.id}>
+                    {r.name} · {r.id.slice(0, 8)}
+                  </option>
+                ))}
+                {form.delivery_release_id &&
+                  !options?.releases.some(
+                    (r) => r.id === form.delivery_release_id,
+                  ) && (
+                    <option value={form.delivery_release_id}>
+                      {form.delivery_release?.name || "原交付归档"}
+                      （已作废或不可选，保留历史）
+                    </option>
+                  )}
+              </select>
+            </Field>
+            <Field
+              label="本次交付配置版本"
+              hint="只保存版本编号引用，配置内容仍在加密配置库查看，不会自动部署。多个现场需要不同版本时可分别关联，现场目标仍在配置实际使用中登记。"
+            >
+              <div className="space-y-3">
+                {options?.configurations.map((c) => (
+                  <label className="block text-xs text-slate-500" key={c.id}>
+                    {c.name}
+                    <select
+                      className={inputClass + " mt-1"}
+                      aria-label={`${c.name}交付版本`}
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value)
+                          update("configuration_version_ids", [
+                            ...new Set([
+                              ...form.configuration_version_ids,
+                              e.target.value,
+                            ]),
+                          ]);
+                      }}
+                    >
+                      <option value="">添加具体版本</option>
+                      {c.versions.map((v) => (
+                        <option
+                          key={v.id}
+                          value={v.id}
+                          disabled={form.configuration_version_ids.includes(
+                            v.id,
+                          )}
+                        >
+                          V{v.number} · {v.id.slice(0, 8)}
+                          {form.configuration_version_ids.includes(v.id)
+                            ? "（已关联）"
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+                {form.configuration_version_ids
+                  .filter((id) =>
+                    options?.configurations.some((c) =>
+                      c.versions.some((v) => v.id === id),
+                    ),
+                  )
+                  .map((id) => {
+                    const c = options.configurations.find((c) =>
+                        c.versions.some((v) => v.id === id),
+                      ),
+                      v = c.versions.find((v) => v.id === id);
+                    return (
+                      <label
+                        key={id}
+                        className="flex items-center gap-2 text-xs text-indigo-600"
+                      >
+                        <input
+                          type="checkbox"
+                          checked
+                          onChange={() =>
+                            update(
+                              "configuration_version_ids",
+                              form.configuration_version_ids.filter(
+                                (x) => x !== id,
+                              ),
+                            )
+                          }
+                        />
+                        {c.name} V{v.number}
+                      </label>
+                    );
+                  })}
+                {form.configuration_version_ids
+                  .filter(
+                    (id) =>
+                      !options?.configurations.some((c) =>
+                        c.versions.some((v) => v.id === id),
+                      ),
+                  )
+                  .map((id) => {
+                    const v = form.configuration_versions?.find(
+                      (v) => v.id === id,
+                    );
+                    return (
+                      <label
+                        key={id}
+                        className="flex items-center gap-2 text-xs text-slate-500"
+                      >
+                        <input
+                          type="checkbox"
+                          checked
+                          onChange={() =>
+                            update(
+                              "configuration_version_ids",
+                              form.configuration_version_ids.filter(
+                                (x) => x !== id,
+                              ),
+                            )
+                          }
+                        />
+                        {v?.name || "历史配置"} V{v?.number || "?"}
+                        （已移除，保留引用）
+                      </label>
+                    );
+                  })}
+                {!options && (
+                  <p className="text-xs text-slate-400">正在读取可关联版本…</p>
+                )}
+                {options &&
+                  !options.configurations.length &&
+                  !form.configuration_version_ids.length && (
+                    <p className="text-xs text-slate-400">
+                      本项目暂无配置，可先保存部署资料。
+                    </p>
+                  )}
+              </div>
+            </Field>
+          </div>
           <Field
             label="部署说明"
             hint="可填写访问前提和交接信息；密码、私钥请保存在账号库。"
@@ -451,6 +729,41 @@ function DeploymentDialog({
             />
           </Field>
           <FormError error={error} />
+          {!options && error && (
+            <button
+              type="button"
+              className={secondary}
+              onClick={() => setRetryOptions((r) => r + 1)}
+            >
+              重试读取版本
+            </button>
+          )}
+          {item && (
+            <div className="space-y-3 rounded-2xl border border-slate-100 p-4">
+              <h3 className="text-sm font-semibold text-slate-600">
+                交付基线历史
+              </h3>
+              <p className="text-xs text-slate-400">
+                修改部署资料会追加记录；文件归档或配置后来作废、移除，也不会改写当时的版本引用。
+              </p>
+              {!history.length && (
+                <p className="text-xs text-slate-400">
+                  旧记录首次修改时会保留修改前的基线。
+                </p>
+              )}
+              <HistoryEntries history={history} />
+              {historyBefore && (
+                <button
+                  type="button"
+                  disabled={historyBusy}
+                  className={secondary}
+                  onClick={loadEarlier}
+                >
+                  {historyBusy ? "正在载入…" : "更早记录"}
+                </button>
+              )}
+            </div>
+          )}
           {item && (
             <button
               type="button"
@@ -461,9 +774,117 @@ function DeploymentDialog({
               移入回收站
             </button>
           )}
-        </div>
-        <FormActions busy={busy} onClose={onClose} />
+        </fieldset>
+        <FormActions busy={busy || !options} onClose={onClose} />
       </form>
+    </Modal>
+  );
+}
+
+function HistoryEntries({ history }) {
+  return (
+    <>
+      {history.map((h) => (
+        <div
+          key={h.id}
+          className="space-y-1 border-t border-slate-100 pt-3 text-xs text-slate-500"
+        >
+          <p>
+            第 {h.revision} 次记录 · {h.actor_name} ·{" "}
+            {new Date(h.created_at).toLocaleString("zh-CN")}
+          </p>
+          <p className="break-words">
+            {h.source.name} · {h.source.data.deployed_version || "未填软件版本"}{" "}
+            · {h.source.data.deployed_at || "未填部署日期"}
+          </p>
+          <p className="break-words">
+            归档：{h.delivery_release?.name || "未关联"}
+            {h.delivery_release ? ` · ${h.delivery_release.id}` : ""}
+          </p>
+          <p className="break-words">
+            配置：
+            {h.configuration_versions
+              .map(
+                (v) => `${v.name || "历史配置"} V${v.number || "?"} (${v.id})`,
+              )
+              .join("、") || "未关联"}
+          </p>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function DeploymentHistoryDialog({ item, onClose }) {
+  const [history, setHistory] = useState([]),
+    [before, setBefore] = useState(null),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setBusy(true);
+    api(`/deployments/${item.id}/baselines`)
+      .then((r) => {
+        if (alive) {
+          setHistory(r.baselines);
+          setBefore(r.next_before);
+        }
+      })
+      .catch((e) => {
+        if (alive) setError(e);
+      })
+      .finally(() => {
+        if (alive) setBusy(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [item.id]);
+  async function earlier() {
+    setBusy(true);
+    try {
+      const r = await api(`/deployments/${item.id}/baselines?before=${before}`);
+      setHistory((h) => [...h, ...r.baselines]);
+      setBefore(r.next_before);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal
+      title={`交付历史 · ${item.name}`}
+      sub="只读查看，移除部署不会删除固定交付基线。"
+      icon={MapPin}
+      onClose={onClose}
+    >
+      <div className="max-h-[65dvh] space-y-4 overflow-y-auto px-6 pb-6">
+        <p className="text-xs text-slate-500">
+          当前记录已移入回收站，以下为当时登记的不可变版本引用。
+        </p>
+        <HistoryEntries history={history} />
+        {!busy && !history.length && (
+          <p className="text-xs text-slate-400">
+            旧记录尚未生成交付基线，原部署资料仍保留在回收站。
+          </p>
+        )}
+        {busy && <p className="text-xs text-slate-400">正在载入…</p>}
+        <FormError error={error} />
+        {before && (
+          <button
+            type="button"
+            className={secondary}
+            disabled={busy}
+            onClick={earlier}
+          >
+            更早记录
+          </button>
+        )}
+        <button type="button" className={secondary} onClick={onClose}>
+          关闭
+        </button>
+      </div>
     </Modal>
   );
 }

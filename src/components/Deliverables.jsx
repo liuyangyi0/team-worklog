@@ -13,7 +13,13 @@ import {
 } from "lucide-react";
 import { api } from "../api.js";
 import { uploadFile, ensureFolder } from "../library-api.js";
-import { STAGES, PROJECT_KINDS, checklistProgress } from "../checklist.js";
+import {
+  STAGES,
+  PROJECT_KINDS,
+  EVIDENCE_KINDS,
+  checklistProgress,
+  evidenceProgress,
+} from "../checklist.js";
 import {
   Modal,
   primary,
@@ -28,6 +34,11 @@ const statusLabels = {
   draft: "只有工作版",
   ready: "已齐备",
   recorded: "已有记录",
+  linked: "已关联",
+  "needs-file": "待提供文件",
+  "needs-published": "待提供正式版",
+  "needs-credential": "待关联账号",
+  "needs-configuration": "待关联配置",
   "not-applicable": "不适用",
 };
 const statusClasses = {
@@ -35,6 +46,11 @@ const statusClasses = {
   draft: "bg-amber-50 text-amber-600",
   ready: "bg-emerald-50 text-emerald-600",
   recorded: "bg-sky-50 text-sky-600",
+  linked: "bg-emerald-50 text-emerald-600",
+  "needs-file": "bg-rose-50 text-rose-500",
+  "needs-published": "bg-amber-50 text-amber-600",
+  "needs-credential": "bg-rose-50 text-rose-500",
+  "needs-configuration": "bg-rose-50 text-rose-500",
   "not-applicable": "bg-slate-100 text-slate-400",
 };
 const OTHER_STAGE = "其他资料";
@@ -57,6 +73,15 @@ export default function Deliverables({
     [templates, setTemplates] = useState([]),
     [documents, setDocuments] = useState([]),
     [folders, setFolders] = useState([]),
+    [evidenceOptions, setEvidenceOptions] = useState({
+      credentials: [],
+      configurations: [],
+    }),
+    [gaps, setGaps] = useState({
+      unverified_credentials: [],
+      unconfirmed_configurations: [],
+      unowned_documents: [],
+    }),
     [loaded, setLoaded] = useState(false),
     [edit, setEdit] = useState(null),
     [saving, setSaving] = useState(null),
@@ -80,6 +105,16 @@ export default function Deliverables({
       setDocuments(docs.documents);
       setFolders(docs.folders || []);
       setTemplates(saved.templates);
+      setEvidenceOptions(
+        list.evidence_options || { credentials: [], configurations: [] },
+      );
+      setGaps(
+        list.gaps || {
+          unverified_credentials: [],
+          unconfirmed_configurations: [],
+          unowned_documents: [],
+        },
+      );
       setLoaded(true);
       setError("");
     } catch (e) {
@@ -205,6 +240,44 @@ export default function Deliverables({
   }
   if (!user || !project) return null;
   const progress = checklistProgress(items);
+  const evidence = evidenceProgress(items);
+  const gapGroups = [
+    {
+      key: "unverified_credentials",
+      title: "账号待核实",
+      help: "资源与配置 → 账号：搜索名称，登记真实设备或服务的核实结果。",
+      module: "resources",
+      tab: "credentials",
+    },
+    {
+      key: "unconfirmed_configurations",
+      title: "配置未确认现场应用",
+      help: "资源与配置 → 配置：搜索名称，登记具体现场实例的实际使用版本。",
+      module: "resources",
+      tab: "configurations",
+    },
+    {
+      key: "unowned_documents",
+      title: "文件无人维护",
+      help: "打开文件详情，补充维护人。",
+      module: "documents",
+    },
+  ];
+  const gapLink = (group, item) => {
+    const params = new URLSearchParams({
+      project: project.id,
+      module: group.module,
+    });
+    if (group.module === "documents") params.set("document", item.id);
+    else {
+      params.set("resourceTab", group.tab);
+      params.set(
+        group.tab === "credentials" ? "credential" : "configuration",
+        item.id,
+      );
+    }
+    return "?" + params.toString();
+  };
   const applyButtons = (
     <>
       {PROJECT_KINDS.map((kind) => (
@@ -308,6 +381,14 @@ export default function Deliverables({
                       {progress.unpublished} 项待发布正式版
                     </span>
                   )}
+                  <span
+                    className={
+                      "ml-1.5 " +
+                      (evidence.missing ? "text-amber-600" : "text-emerald-600")
+                    }
+                  >
+                    · 符合证据要求 {evidence.met}/{evidence.required}
+                  </span>
                 </>
               ) : (
                 "尚未标记必需资料"
@@ -351,6 +432,9 @@ export default function Deliverables({
                 applicable: true,
                 document_id: "",
                 version_id: "",
+                evidence_kind: "record",
+                credential_id: "",
+                configuration_id: "",
               });
             }}
           >
@@ -402,6 +486,53 @@ export default function Deliverables({
         </p>
       )}
       <FormError error={error} />
+      {loaded && (
+        <details className="mt-4 rounded-xl border border-slate-100 bg-slate-50/60 px-4 py-3 text-xs">
+          <summary className="cursor-pointer font-medium text-slate-600">
+            交接检查
+            <span className="ml-2 font-normal text-slate-400">
+              {gapGroups
+                .map(
+                  (group) => group.title + " " + (gaps[group.key]?.length || 0),
+                )
+                .join(" · ")}
+            </span>
+          </summary>
+          <p className="mt-2 text-slate-400">
+            这里核对现有登记，不代表已在现场自动检测或客户已验收。
+          </p>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            {gapGroups.map((group) => (
+              <div
+                key={group.key}
+                className="min-w-0 rounded-xl border border-slate-100 bg-white p-3"
+              >
+                <p className="font-medium text-slate-600">
+                  {group.title} · {gaps[group.key]?.length || 0}
+                </p>
+                <p className="mt-1 leading-relaxed text-slate-400">
+                  {group.help}
+                </p>
+                <ul className="mt-2 max-h-36 space-y-1 overflow-y-auto">
+                  {(gaps[group.key] || []).map((item) => (
+                    <li key={item.id}>
+                      <a
+                        className="break-words text-indigo-500 hover:underline"
+                        href={gapLink(group, item)}
+                      >
+                        {item.title}
+                      </a>
+                    </li>
+                  ))}
+                  {!gaps[group.key]?.length && (
+                    <li className="text-emerald-600">暂无此类缺口</li>
+                  )}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
       {items.length > 0 && (
         <div className="mt-4 overflow-x-auto">
           <table className="checklist-table w-full min-w-[640px] text-left text-sm">
@@ -448,6 +579,11 @@ export default function Deliverables({
                           {item.hint}
                         </span>
                       )}
+                      <span className="mt-0.5 block text-[11px] text-indigo-400">
+                        {EVIDENCE_KINDS.find(
+                          (kind) => kind.id === item.evidence_kind,
+                        )?.label || "记录即可"}
+                      </span>
                     </td>
                     <td className="pr-3 text-slate-500">{item.owner || "—"}</td>
                     <td className="max-w-52 py-3 pr-3 text-xs text-slate-400">
@@ -464,6 +600,14 @@ export default function Deliverables({
                       {item.note_count > 0 && (
                         <span className="mt-0.5 block text-sky-600">
                           随手记 {item.note_count} 条
+                        </span>
+                      )}
+                      {item.evidence_title && (
+                        <span className="mt-0.5 block text-indigo-500">
+                          {item.evidence_kind === "credential"
+                            ? "账号："
+                            : "配置："}
+                          {item.evidence_title}
                         </span>
                       )}
                     </td>
@@ -569,7 +713,7 @@ export default function Deliverables({
       {saving && (
         <Modal
           title="另存为清单模板"
-          sub="保存当前适用的资料项（含阶段、必需标记和说明），供同类项目套用"
+          sub="保存当前适用的资料项及证据要求，不复制关联文件、账号和配置"
           icon={BookmarkPlus}
           onClose={() => !busy && setSaving(null)}
         >
@@ -646,140 +790,223 @@ export default function Deliverables({
                     version: edit.version,
                     document_id: edit.document_id || null,
                     version_id: edit.version_id || null,
+                    evidence_kind: edit.evidence_kind || "record",
+                    credential_id: edit.credential_id || null,
+                    configuration_id: edit.configuration_id || null,
                   },
                 ),
               );
             }}
           >
-            <label className="block text-xs text-slate-500">
-              应交资料名称
-              <input
-                className={inputClass + " mt-1.5"}
-                required
-                maxLength={200}
-                value={edit.title}
-                onChange={(event) =>
-                  setEdit({ ...edit, title: event.target.value })
-                }
-              />
-            </label>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Field label="所属阶段">
+            <fieldset disabled={busy} className="space-y-4">
+              <label className="block text-xs text-slate-500">
+                应交资料名称
+                <input
+                  className={inputClass + " mt-1.5"}
+                  required
+                  maxLength={200}
+                  value={edit.title}
+                  onChange={(event) =>
+                    setEdit({ ...edit, title: event.target.value })
+                  }
+                />
+              </label>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Field label="所属阶段">
+                  <select
+                    className={inputClass}
+                    value={edit.stage || ""}
+                    onChange={(event) =>
+                      setEdit({ ...edit, stage: event.target.value })
+                    }
+                  >
+                    <option value="">{OTHER_STAGE}</option>
+                    {STAGES.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <label className="block text-xs text-slate-500">
+                  维护人
+                  <input
+                    className={inputClass + " mt-1.5"}
+                    list="deliverable-members"
+                    maxLength={100}
+                    value={edit.owner}
+                    onChange={(event) =>
+                      setEdit({ ...edit, owner: event.target.value })
+                    }
+                  />
+                  <datalist id="deliverable-members">
+                    {members.map((name) => (
+                      <option key={name} value={name} />
+                    ))}
+                  </datalist>
+                </label>
+              </div>
+              <label className="block text-xs text-slate-500">
+                填写说明（选填）
+                <input
+                  className={inputClass + " mt-1.5"}
+                  maxLength={300}
+                  placeholder="例如：型号、序列号、数量和安装位置"
+                  value={edit.hint || ""}
+                  onChange={(event) =>
+                    setEdit({ ...edit, hint: event.target.value })
+                  }
+                />
+              </label>
+              <Field
+                label="证据要求"
+                hint="普通事项保留记录即可；关键资料可要求文件或账号配置引用。"
+              >
                 <select
                   className={inputClass}
-                  value={edit.stage || ""}
+                  value={edit.evidence_kind || "record"}
                   onChange={(event) =>
-                    setEdit({ ...edit, stage: event.target.value })
+                    setEdit({
+                      ...edit,
+                      evidence_kind: event.target.value,
+                      credential_id: null,
+                      configuration_id: null,
+                    })
                   }
+                  disabled={busy}
                 >
-                  <option value="">{OTHER_STAGE}</option>
-                  {STAGES.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
+                  {EVIDENCE_KINDS.map((kind) => (
+                    <option key={kind.id} value={kind.id}>
+                      {kind.label}
                     </option>
                   ))}
                 </select>
               </Field>
-              <label className="block text-xs text-slate-500">
-                维护人
-                <input
+              {["credential", "configuration"].includes(edit.evidence_kind) && (
+                <>
+                  <Field
+                    label={
+                      edit.evidence_kind === "credential"
+                        ? "关联加密账号"
+                        : "关联加密配置"
+                    }
+                    hint="这里只保存引用，不会把密码或配置正文复制到清单、模板和普通交付包。"
+                  >
+                    <select
+                      className={inputClass}
+                      value={
+                        edit.evidence_kind === "credential"
+                          ? edit.credential_id || ""
+                          : edit.configuration_id || ""
+                      }
+                      disabled={busy}
+                      onChange={(event) =>
+                        setEdit({
+                          ...edit,
+                          [edit.evidence_kind === "credential"
+                            ? "credential_id"
+                            : "configuration_id"]: event.target.value || null,
+                        })
+                      }
+                    >
+                      <option value="">尚未关联</option>
+                      {(edit.evidence_kind === "credential"
+                        ? evidenceOptions.credentials
+                        : evidenceOptions.configurations
+                      ).map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.title}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  {((edit.evidence_kind === "credential" &&
+                    edit.credential_id &&
+                    !evidenceOptions.credentials.some(
+                      (item) => item.id === edit.credential_id,
+                    )) ||
+                    (edit.evidence_kind === "configuration" &&
+                      edit.configuration_id &&
+                      !evidenceOptions.configurations.some(
+                        (item) => item.id === edit.configuration_id,
+                      ))) && (
+                    <p className="mt-1 text-xs text-amber-600">
+                      原关联已失效，请重新选择；保留历史引用不会满足交接要求。
+                    </p>
+                  )}
+                </>
+              )}
+              <Field label="关联项目文档">
+                <select
                   className={inputClass + " mt-1.5"}
-                  list="deliverable-members"
-                  maxLength={100}
-                  value={edit.owner}
+                  value={edit.document_id || ""}
                   onChange={(event) =>
-                    setEdit({ ...edit, owner: event.target.value })
+                    setEdit({
+                      ...edit,
+                      document_id: event.target.value,
+                      version_id: null,
+                    })
                   }
-                />
-                <datalist id="deliverable-members">
-                  {members.map((name) => (
-                    <option key={name} value={name} />
+                >
+                  <option value="">尚未提供</option>
+                  {documents.map((doc) => (
+                    <option key={doc.id} value={doc.id}>
+                      {doc.title}
+                    </option>
                   ))}
-                </datalist>
-              </label>
-            </div>
-            <label className="block text-xs text-slate-500">
-              填写说明（选填）
-              <input
-                className={inputClass + " mt-1.5"}
-                maxLength={300}
-                placeholder="例如：型号、序列号、数量和安装位置"
-                value={edit.hint || ""}
-                onChange={(event) =>
-                  setEdit({ ...edit, hint: event.target.value })
-                }
-              />
-            </label>
-            <Field label="关联项目文档">
-              <select
-                className={inputClass + " mt-1.5"}
-                value={edit.document_id || ""}
-                onChange={(event) =>
-                  setEdit({
-                    ...edit,
-                    document_id: event.target.value,
-                    version_id: null,
-                  })
-                }
-              >
-                <option value="">尚未提供</option>
-                {documents.map((doc) => (
-                  <option key={doc.id} value={doc.id}>
-                    {doc.title}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            {edit.version_id ? (
-              <label className="flex items-center gap-2 text-xs text-slate-500">
-                <input
-                  type="checkbox"
-                  checked={true}
-                  onChange={() => setEdit({ ...edit, version_id: null })}
-                />
-                保留固定版本引用（取消后跟随文档正式版）
-              </label>
-            ) : (
-              <p className="text-xs text-slate-400">
-                关联后跟随该文档的正式版；只有工作版时会显示待发布。
-              </p>
-            )}
-            <div className="flex flex-wrap gap-x-6 gap-y-2">
-              <label className="flex items-center gap-2 text-sm text-slate-500">
-                <input
-                  type="checkbox"
-                  checked={Boolean(edit.required)}
-                  onChange={(event) =>
-                    setEdit({ ...edit, required: event.target.checked })
-                  }
-                />
-                必需资料
-              </label>
-              <label className="flex items-center gap-2 text-sm text-slate-500">
-                <input
-                  type="checkbox"
-                  checked={Boolean(edit.applicable)}
-                  onChange={(event) =>
-                    setEdit({ ...edit, applicable: event.target.checked })
-                  }
-                />
-                适用于本项目
-              </label>
-            </div>
-            <FormError error={error} />
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className={secondary}
-                disabled={busy}
-                onClick={() => setEdit(null)}
-              >
-                取消
-              </button>
-              <button className={primary} disabled={busy}>
-                {busy ? "保存中…" : "保存资料项"}
-              </button>
-            </div>
+                </select>
+              </Field>
+              {edit.version_id ? (
+                <label className="flex items-center gap-2 text-xs text-slate-500">
+                  <input
+                    type="checkbox"
+                    checked={true}
+                    onChange={() => setEdit({ ...edit, version_id: null })}
+                  />
+                  保留固定版本引用（取消后跟随文档正式版）
+                </label>
+              ) : (
+                <p className="text-xs text-slate-400">
+                  关联后跟随正式版。要求正式文件时，固定版本也必须曾被发布；“已有资料”不代表客户验收通过。
+                </p>
+              )}
+              <div className="flex flex-wrap gap-x-6 gap-y-2">
+                <label className="flex items-center gap-2 text-sm text-slate-500">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(edit.required)}
+                    onChange={(event) =>
+                      setEdit({ ...edit, required: event.target.checked })
+                    }
+                  />
+                  必需资料
+                </label>
+                <label className="flex items-center gap-2 text-sm text-slate-500">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(edit.applicable)}
+                    onChange={(event) =>
+                      setEdit({ ...edit, applicable: event.target.checked })
+                    }
+                  />
+                  适用于本项目
+                </label>
+              </div>
+              <FormError error={error} />
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  className={secondary}
+                  disabled={busy}
+                  onClick={() => setEdit(null)}
+                >
+                  取消
+                </button>
+                <button className={primary} disabled={busy}>
+                  {busy ? "保存中…" : "保存资料项"}
+                </button>
+              </div>
+            </fieldset>
           </form>
         </Modal>
       )}

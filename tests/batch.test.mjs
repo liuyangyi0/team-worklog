@@ -9,7 +9,7 @@ import { logChanges } from "../src/logs.js";
 const origin = "https://worklog.example.com";
 async function start(t) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "worklog-batch-"));
-  const app = await createApp({ dataDir, origin });
+  const app = await createApp({ allowUninvitedRegistration: true, dataDir, origin });
   await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
   t.after(async () => {
     await app.close();

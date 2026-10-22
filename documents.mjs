@@ -7,7 +7,7 @@ import { libraryFail as fail, libraryTx as tx, resourceEvent } from "./library-c
 import { createStorage, safeFilename, relativeParts, streamZip, zip32Size } from "./storage.mjs";
 import { createUploads } from "./uploads.mjs";
 import { installNotesSchema } from "./notes.mjs";
-import { starterItems, PROJECT_KINDS, checklistProgress } from "./src/checklist.js";
+import { starterItems, PROJECT_KINDS, EVIDENCE_KINDS, checklistProgress, evidenceProgress } from "./src/checklist.js";
 
 const now = () => new Date().toISOString();
 const text = (value, name, maximum, fallback = "") => {
@@ -43,7 +43,7 @@ export function installDocumentSchema(db) {
     CREATE TABLE IF NOT EXISTS checklist_templates(id TEXT PRIMARY KEY,name TEXT NOT NULL,items_json TEXT NOT NULL,creator_id TEXT NOT NULL REFERENCES users(id),creator_name TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,deleted INTEGER NOT NULL DEFAULT 0,created TEXT NOT NULL,updated TEXT NOT NULL);
     CREATE UNIQUE INDEX IF NOT EXISTS checklist_template_names ON checklist_templates(name) WHERE deleted=0;`);
   const deliverableColumns = db.prepare("PRAGMA table_info(document_deliverables)").all().map((c) => c.name);
-  for (const [column, definition] of [["stage", "TEXT NOT NULL DEFAULT ''"], ["required", "INTEGER NOT NULL DEFAULT 0"], ["hint", "TEXT NOT NULL DEFAULT ''"], ["sort", "INTEGER NOT NULL DEFAULT 0"]])
+  for (const [column, definition] of [["stage", "TEXT NOT NULL DEFAULT ''"], ["required", "INTEGER NOT NULL DEFAULT 0"], ["hint", "TEXT NOT NULL DEFAULT ''"], ["sort", "INTEGER NOT NULL DEFAULT 0"], ["evidence_kind", "TEXT NOT NULL DEFAULT 'record'"], ["credential_id", "TEXT"], ["configuration_id", "TEXT"]])
     if (!deliverableColumns.includes(column)) db.exec("ALTER TABLE document_deliverables ADD COLUMN " + column + " " + definition);
   installNotesSchema(db);
 }
@@ -54,6 +54,7 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
   const get = (sql, ...values) => db.prepare(sql).get(...values);
   const all = (sql, ...values) => db.prepare(sql).all(...values);
   const run = (sql, ...values) => db.prepare(sql).run(...values);
+  const hasTable = (name) => Boolean(get("SELECT name FROM sqlite_master WHERE type='table' AND name=?", name));
   const auth = (user) => { if (!user) fail(401, "请先登录后访问项目资料"); };
   const project = (id) => { const p = typeof id === "string" && get("SELECT id,name FROM projects WHERE id=?", id); if (!p) fail(404, "项目不存在"); return p; };
   const document = (id, deleted = false) => { if (typeof id !== "string") fail(400, "文档编号无效"); const d = get("SELECT * FROM documents WHERE id=?", id); if (!d || (!deleted && d.deleted)) fail(404, "文档不存在或已删除"); return d; };
@@ -124,14 +125,45 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
     return result;
   } });
 
+  function evidenceReference(kind, id, projectId) {
+    if (!id || !["credential", "configuration"].includes(kind)) return null;
+    if (kind === "credential") {
+      if (!hasTable("credentials")) return null;
+      return get("SELECT id,title,verified_status FROM credentials WHERE id=? AND deleted=0 AND (project_id=? OR EXISTS(SELECT 1 FROM json_each(credentials.project_ids) WHERE value=?))", id, projectId, projectId) || null;
+    }
+    if (!hasTable("configurations")) return null;
+    return get("SELECT id,name AS title FROM configurations WHERE id=? AND project_id=? AND deleted=0 AND latest_version_id IS NOT NULL", id, projectId) || null;
+  }
+  function handoverDetails(projectId) {
+    // Only identifiers, titles and status cross this endpoint. Do not hydrate a
+    // resource or configuration: those objects may contain secret-adjacent notes.
+    const credentials = hasTable("credentials") ? all("SELECT id,title,verified_status FROM credentials WHERE deleted=0 AND (project_id=? OR EXISTS(SELECT 1 FROM json_each(credentials.project_ids) WHERE value=?)) ORDER BY title,id", projectId, projectId) : [];
+    const configurations = hasTable("configurations") ? all("SELECT id,name AS title,resource_id,environment_id FROM configurations WHERE project_id=? AND deleted=0 AND latest_version_id IS NOT NULL ORDER BY name,id", projectId) : [];
+    const unconfirmed = configurations.filter((c) => !hasTable("configuration_applications") || !get("SELECT ca.id FROM configuration_applications ca JOIN resources r ON r.id=ca.resource_id WHERE ca.configuration_id=? AND ca.result IN ('applied','verified','rolled_back') AND r.deleted=0 AND (? IS NULL OR ca.resource_id=?) AND (? IS NULL OR COALESCE(ca.environment_id,'')=?) LIMIT 1", c.id, c.resource_id, c.resource_id, c.environment_id, c.environment_id));
+    return {
+      evidence_options: { credentials, configurations: configurations.map(({ id, title }) => ({ id, title })) },
+      gaps: {
+        unverified_credentials: credentials.filter((c) => c.verified_status !== "verified"),
+        unconfirmed_configurations: unconfirmed.map(({ id, title }) => ({ id, title })),
+        unowned_documents: all("SELECT id,title FROM documents WHERE project_id=? AND deleted=0 AND trim(owner)='' ORDER BY title,id", projectId),
+      },
+    };
+  }
   function presentDeliverable(item) {
     const d = item.document_id ? get("SELECT * FROM documents WHERE id=?", item.document_id) : null;
     const resolvedId = item.version_id || d?.published_version_id || null;
     const v = d && resolvedId ? version(d.id, resolvedId) : null;
     const noteCount = get("SELECT COUNT(*) n FROM project_notes WHERE deliverable_id=? AND deleted=0", item.id).n;
-    // A site-log entry is real evidence for an item even before any file exists.
-    const status = !item.applicable ? "not-applicable" : d && !d.deleted ? (resolvedId ? "ready" : "draft") : noteCount ? "recorded" : "missing";
-    return { ...item, applicable: Boolean(item.applicable), required: Boolean(item.required), status, note_count: noteCount, reference_mode: item.version_id ? "fixed" : "published", resolved_version_id: resolvedId, document_title: d?.title || "", document_deleted: Boolean(d?.deleted), working_version_id: d && !d.deleted ? d.current_version_id : null, filename: v?.filename || "", number: v?.number || null };
+    const kind = item.evidence_kind || "record";
+    const linked = evidenceReference(kind, kind === "credential" ? item.credential_id : item.configuration_id, item.project_id);
+    const fileAvailable = Boolean(d && !d.deleted && d.current_version_id);
+    // An explicitly pinned version must itself have been published. A plain
+    // working version cannot satisfy a formal-document requirement by pinning it.
+    const formallyPublished = Boolean(fileAvailable && resolvedId && (d.published_version_id === resolvedId || get("SELECT id FROM resource_events WHERE entity_type='document' AND entity_id=? AND action='publish' AND json_extract(details_json,'$.version_id')=? LIMIT 1", d.id, resolvedId)));
+    const collectionStatus = !item.applicable ? "not-applicable" : fileAvailable ? (resolvedId ? "ready" : "draft") : noteCount ? "recorded" : linked ? "linked" : "missing";
+    const evidenceMet = kind === "file" ? fileAvailable : kind === "published" ? formallyPublished : ["credential", "configuration"].includes(kind) ? Boolean(linked) : ["ready", "draft", "recorded", "linked"].includes(collectionStatus);
+    const status = !item.applicable ? "not-applicable" : evidenceMet ? (linked && !fileAvailable && !noteCount ? "linked" : collectionStatus) : kind === "record" ? collectionStatus : "needs-" + kind;
+    return { ...item, applicable: Boolean(item.applicable), required: Boolean(item.required), evidence_kind: kind, evidence_met: evidenceMet, evidence_title: linked?.title || "", collection_status: collectionStatus, status, note_count: noteCount, reference_mode: item.version_id ? "fixed" : "published", resolved_version_id: resolvedId, document_title: d?.title || "", document_deleted: Boolean(d?.deleted), working_version_id: fileAvailable ? d.current_version_id : null, filename: v?.filename || "", number: v?.number || null };
   }
   const deliverableItems = (projectId) => all("SELECT * FROM document_deliverables WHERE project_id=? AND deleted=0 ORDER BY sort,created,id", projectId).map(presentDeliverable);
   const nextSort = (projectId) => get("SELECT COALESCE(MAX(sort),0)+1 n FROM document_deliverables WHERE project_id=?", projectId).n;
@@ -139,7 +171,7 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
   // Missing required items per project, for the navigation badge.
   function checklistSummary() {
     const summary = {};
-    for (const { project_id } of all("SELECT DISTINCT project_id FROM document_deliverables WHERE deleted=0 AND required=1 AND applicable=1")) summary[project_id] = checklistProgress(deliverableItems(project_id));
+    for (const { project_id } of all("SELECT DISTINCT project_id FROM document_deliverables WHERE deleted=0 AND required=1 AND applicable=1")) { const items = deliverableItems(project_id); summary[project_id] = { ...checklistProgress(items), evidence_missing: evidenceProgress(items).missing }; }
     return summary;
   }
   async function api(input) {
@@ -168,14 +200,14 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
         for (const item of items) {
           if (existing.has(item.title)) continue;
           existing.add(item.title);
-          run("INSERT INTO document_deliverables(id,project_id,title,owner,applicable,stage,required,hint,sort,created,updated) VALUES(?,?,?,?,1,?,?,?,?,?,?)", randomUUID(), projectId, item.title, "", item.stage || "", Number(Boolean(item.required)), item.hint || "", nextSort(projectId), now(), now());
+          run("INSERT INTO document_deliverables(id,project_id,title,owner,applicable,stage,required,hint,evidence_kind,sort,created,updated) VALUES(?,?,?,?,1,?,?,?,?,?,?,?)", randomUUID(), projectId, item.title, "", item.stage || "", Number(Boolean(item.required)), item.hint || "", EVIDENCE_KINDS.some((k) => k.id === item.evidence_kind) ? item.evidence_kind : "record", nextSort(projectId), now(), now());
           count++;
         }
         resourceEvent(db, user, { action: "apply-checklist", entityType: "checklist", entityId: projectId, projectId, details: { name, count } });
         return count;
       });
       const list = deliverableItems(projectId);
-      return { data: { added, items: list, progress: checklistProgress(list) } };
+      return { data: { added, items: list, progress: checklistProgress(list), evidence_progress: evidenceProgress(list) } };
     }
     const templateList = route === "/checklist-templates";
     const templateItem = route.match(/^\/checklist-templates\/([\w-]+)$/);
@@ -183,7 +215,7 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
     if (templateList && method === "POST") {
       const name = text(b.name, "模板名称", 60); if (!name) fail(400, "请填写模板名称");
       const projectId = project(b.project_id).id;
-      const items = all("SELECT title,stage,required,hint FROM document_deliverables WHERE project_id=? AND deleted=0 AND applicable=1 ORDER BY sort,created,id", projectId).map((r) => ({ ...r, required: Boolean(r.required) }));
+      const items = all("SELECT title,stage,required,hint,evidence_kind FROM document_deliverables WHERE project_id=? AND deleted=0 AND applicable=1 ORDER BY sort,created,id", projectId).map((r) => ({ ...r, required: Boolean(r.required) }));
       if (!items.length) fail(400, "清单为空，先添加资料项再保存为模板");
       if (get("SELECT id FROM checklist_templates WHERE name=? AND deleted=0", name)) fail(409, "已有同名模板");
       const id = randomUUID();
@@ -209,7 +241,7 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
       const old = deliverableItem ? get("SELECT * FROM document_deliverables WHERE id=? AND deleted=0", deliverableItem[1]) : null;
       if (deliverableItem && !old) fail(404, "交接清单条目不存在");
       const projectId = old?.project_id || deliverableList[1]; project(projectId);
-      if (deliverableList && method === "GET") { const items = deliverableItems(projectId); return { data: { items, progress: checklistProgress(items) } }; }
+      if (deliverableList && method === "GET") { const items = deliverableItems(projectId); return { data: { items, progress: checklistProgress(items), evidence_progress: evidenceProgress(items), ...handoverDetails(projectId) } }; }
       if ((deliverableList && method === "POST") || (deliverableItem && method === "PATCH")) {
         if (old) checkVersion(old, b);
         const title = text(b.title, "清单名称", 240, old?.title || ""); if (!title) fail(400, "请填写清单名称");
@@ -219,6 +251,13 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
         const required = b.required === undefined ? old?.required ?? false : b.required;
         if (![true, false, 0, 1].includes(required)) fail(400, "必需标记无效");
         const stage = text(b.stage, "阶段", 20, old?.stage || ""), hint = text(b.hint, "填写说明", 300, old?.hint || "");
+        const evidenceKind = b.evidence_kind === undefined ? old?.evidence_kind || "record" : b.evidence_kind;
+        if (!EVIDENCE_KINDS.some((k) => k.id === evidenceKind)) fail(400, "交接证据要求无效");
+        const credentialId = evidenceKind === "credential" ? (b.credential_id === undefined ? old?.credential_id || null : b.credential_id || null) : null;
+        const configurationId = evidenceKind === "configuration" ? (b.configuration_id === undefined ? old?.configuration_id || null : b.configuration_id || null) : null;
+        for (const [kind, id, previous] of [["credential", credentialId, old?.credential_id], ["configuration", configurationId, old?.configuration_id]]) {
+          if (id && (typeof id !== "string" || (id !== previous && !evidenceReference(kind, id, projectId)))) fail(400, "关联账号或配置无效或不属于该项目");
+        }
         const documentId = b.document_id === undefined ? old?.document_id || null : b.document_id || null;
         const versionId = b.version_id === undefined ? (documentId === old?.document_id ? old?.version_id || null : null) : b.version_id || null;
         if (documentId && typeof documentId !== "string") fail(400, "关联文档无效");
@@ -227,9 +266,9 @@ export function createDocuments({ db, dataDir, filesDir, maxFileBytes, quotaByte
         if (versionId) version(documentId, versionId);
         const id = old?.id || randomUUID();
         tx(db, () => {
-          if (old) run("UPDATE document_deliverables SET title=?,owner=?,applicable=?,document_id=?,version_id=?,stage=?,required=?,hint=?,version=version+1,updated=? WHERE id=?", title, owner, Number(applicable), documentId, versionId, stage, Number(required), hint, now(), id);
-          else run("INSERT INTO document_deliverables(id,project_id,title,owner,applicable,document_id,version_id,stage,required,hint,sort,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", id, projectId, title, owner, Number(applicable), documentId, versionId, stage, Number(required), hint, nextSort(projectId), now(), now());
-          event(user, old ? "update-deliverable" : "create-deliverable", id, projectId, { title, document_id: documentId, version_id: versionId, status: Number(required) ? "必需" : "选填" });
+          if (old) run("UPDATE document_deliverables SET title=?,owner=?,applicable=?,document_id=?,version_id=?,stage=?,required=?,hint=?,evidence_kind=?,credential_id=?,configuration_id=?,version=version+1,updated=? WHERE id=?", title, owner, Number(applicable), documentId, versionId, stage, Number(required), hint, evidenceKind, credentialId, configurationId, now(), id);
+          else run("INSERT INTO document_deliverables(id,project_id,title,owner,applicable,document_id,version_id,stage,required,hint,evidence_kind,credential_id,configuration_id,sort,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", id, projectId, title, owner, Number(applicable), documentId, versionId, stage, Number(required), hint, evidenceKind, credentialId, configurationId, nextSort(projectId), now(), now());
+          event(user, old ? "update-deliverable" : "create-deliverable", id, projectId, { title, document_id: documentId, version_id: versionId, fields: ["evidence_kind:" + evidenceKind, "credential_id:" + (credentialId || ""), "configuration_id:" + (configurationId || "")], status: Number(required) ? "必需" : "选填" });
         });
         return { status: old ? 200 : 201, data: { item: presentDeliverable(get("SELECT * FROM document_deliverables WHERE id=?", id)), id } };
       }

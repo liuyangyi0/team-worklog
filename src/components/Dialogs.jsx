@@ -22,9 +22,12 @@ import {
   statistics,
   PRIORITIES,
   beijingDate,
+  isCompleted,
+  recordMonth,
 } from "../model.js";
 import { download, exportPicture } from "../picture.js";
 import { PROJECT_KINDS } from "../checklist.js";
+import PublicNotice from "./PublicNotice.jsx";
 import {
   AvatarChip,
   DateBadge,
@@ -61,7 +64,7 @@ export function AuthDialog({ onClose, onDone }) {
   return (
     <Modal
       title="欢迎来到项目工作台"
-      sub="公开查看，注册登录后即可填写"
+      sub="公开查看，凭成员邀请码注册后即可填写"
       icon={LogIn}
       onClose={onClose}
     >
@@ -98,6 +101,21 @@ export function AuthDialog({ onClose, onDone }) {
                 maxLength={30}
                 className={inputClass}
                 placeholder="请填写真实姓名"
+              />
+            </Field>
+          )}
+          {mode === "register" && (
+            <Field
+              label="成员邀请码"
+              hint="请向管理员领取与你姓名绑定的邀请码。"
+            >
+              <input
+                name="invitationCode"
+                required
+                autoComplete="off"
+                maxLength={160}
+                className={inputClass}
+                placeholder="输入个人邀请码"
               />
             </Field>
           )}
@@ -157,11 +175,27 @@ export function RecordDialog({
           : [],
     ),
     [actual, setActual] = useState(record ? splitNames(record.actual) : []),
+    [date, setDate] = useState(record?.date || ""),
     [dependencyIds, setDependencyIds] = useState(record?.dependency_ids || []),
     [blocked, setBlocked] = useState(Boolean(record?.blocked)),
     [helpers, setHelpers] = useState(splitNames(record?.support_people)),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const firstChild =
+    parent &&
+    !parent.child_count &&
+    !records.some((r) => r.parent_id === parent.id);
+  const priorMonth = record && isCompleted(record) ? recordMonth(record) : "";
+  const nextRecord = {
+    ...record,
+    actual: actual.join("、"),
+    date,
+    completed_at:
+      record && isCompleted(record)
+        ? record.completed_at
+        : new Date().toISOString(),
+  };
+  const nextMonth = isCompleted(nextRecord) ? recordMonth(nextRecord) : "";
   async function submit(e) {
     e.preventDefault();
     if (!owner.length) return;
@@ -199,6 +233,15 @@ export function RecordDialog({
     >
       <form onSubmit={submit}>
         <div className="space-y-5 px-6 pb-2">
+          <PublicNotice />
+          {firstChild && (
+            <p
+              role="status"
+              className="rounded-xl bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-700"
+            >
+              添加首个子任务后，上级任务将作为分组，不再单独计入完成数量；原记录和完成人仍保留。独立完成的工作可另记为具体子任务。
+            </p>
+          )}
           <Field label="工作事项">
             <textarea
               name="task"
@@ -261,8 +304,8 @@ export function RecordDialog({
           <details
             open={Boolean(
               record?.dependency_ids?.length ||
-              record?.blocked ||
-              record?.support_people,
+                record?.blocked ||
+                record?.support_people,
             )}
             className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4"
           >
@@ -346,10 +389,21 @@ export function RecordDialog({
             <input
               type="date"
               name="date"
-              defaultValue={record?.date || ""}
+              aria-label="完成日期（选填）"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
               className={inputClass}
             />
           </Field>
+          {priorMonth && nextMonth && priorMonth !== nextMonth && (
+            <p
+              role="status"
+              className="rounded-xl bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-700"
+            >
+              保存后，统计月份将从 {priorMonth} 调整为 {nextMonth}
+              。已导出的历史核对结果不会自动更新。
+            </p>
+          )}
         </div>
         <FormError error={error} onReload={onReload} />
         <FormActions
@@ -766,7 +820,7 @@ export function BatchDialog({ count, people, onClose, onSave }) {
             </button>
           </div>
           <p className="-mt-3 text-xs leading-relaxed text-slate-400">
-            实际完成人或完成日期任填一项，所选记录即标记为完成。
+            实际完成人或完成日期任填一项，所选记录即标记为完成。填写完成日期会按该日期重新计算统计月份。
           </p>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field label="优先级">
